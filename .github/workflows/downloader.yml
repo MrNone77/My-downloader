@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: '🔗 لینک های دانلود (با فاصله جدا کنید - یوتیوب هم پشتیبانی میشه)'
+        description: '🔗 لینک های دانلود (با فاصله جدا کنید)'
         required: true
         type: string
       mode:
@@ -40,7 +40,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq aria2 zip curl bc python3 python3-pip ffmpeg
           pip3 install yt-dlp
-          echo "✅ ابزارها نصب شدن (yt-dlp + ffmpeg + aria2)"
+          echo "✅ ابزارها نصب شدن"
+
+      - name: 🍪 Setup Cookies
+        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
+        run: |
+          echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt
+          echo "✅ کوکی آماده شد"
 
       - name: ⚙️ Configure Git
         run: |
@@ -62,7 +68,13 @@ jobs:
           TMP_DL="/tmp/downloads_temp"
           mkdir -p "$STORAGE" "$TMP_DL"
           
-          # ========== تشخیص نوع لینک ==========
+          # آماده‌سازی آرگومان کوکی
+          COOKIE_ARG=""
+          if [ -f /tmp/cookies.txt ] && [ -s /tmp/cookies.txt ]; then
+            COOKIE_ARG="--cookies /tmp/cookies.txt"
+            echo "🍪 استفاده از کوکی برای احراز هویت"
+          fi
+          
           is_youtube() {
             echo "$1" | grep -qiE "(youtube\.com|youtu\.be)"
           }
@@ -71,7 +83,6 @@ jobs:
             echo "$1" | grep -qiE "(instagram\.com|twitter\.com|x\.com|tiktok\.com|facebook\.com|reddit\.com|vimeo\.com|dailymotion\.com|twitch\.tv)"
           }
           
-          # ========== دانلود معمولی ==========
           download_normal() {
             local url="$1"
             local name="$2"
@@ -104,7 +115,6 @@ jobs:
             return 1
           }
           
-          # ========== دانلود با yt-dlp (یوتیوب و شبکه‌های اجتماعی) ==========
           download_ytdlp() {
             local url="$1"
             local prefix="$2"
@@ -114,6 +124,7 @@ jobs:
             cd "$TMP_DL"
             
             yt-dlp \
+              $COOKIE_ARG \
               --no-warnings \
               --no-playlist \
               --merge-output-format mp4 \
@@ -128,7 +139,6 @@ jobs:
             return 1
           }
           
-          # ========== ذخیره فایل ==========
           save_file() {
             local file="$1"
             local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
@@ -153,7 +163,6 @@ jobs:
             make_readme "$folder" "$name" "$size"
           }
           
-          # ========== ساخت README ==========
           make_readme() {
             local folder="$1"
             local original_name="$2"
@@ -191,7 +200,6 @@ jobs:
           EOF
           }
           
-          # ========== اجرای اصلی ==========
           FAILED=0
           SUCCESS=0
           COUNT=0
@@ -208,7 +216,8 @@ jobs:
               if download_ytdlp "$url" "$COUNT"; then
                 echo "✅ yt-dlp موفق بود"
               else
-                echo "❌ yt-dlp ناموفق"
+                echo "❌ yt-dlp ناموفق - میتونی از Invidious استفاده کنی:"
+                echo "   https://inv.nadeko.net/watch?v=$(echo "$url" | grep -oP '(?:v=|youtu\.be/)[^&\s]+' | head -1)"
                 FAILED=$((FAILED + 1))
                 continue
               fi
@@ -223,7 +232,6 @@ jobs:
               fi
             fi
             
-            # پردازش فایل‌های دانلود شده
             for file in "$TMP_DL"/*; do
               [ -f "$file" ] || continue
               [ ! -s "$file" ] && continue
@@ -234,11 +242,9 @@ jobs:
               SUCCESS=$((SUCCESS + 1))
             done
             
-            # پاکسازی برای لینک بعدی
             rm -f "$TMP_DL"/* 2>/dev/null
           done
           
-          # ========== زیپ ترکیبی ==========
           if [ "$MODE" = "zip_together" ] && [ "$SUCCESS" -gt 1 ]; then
             echo ""
             echo "📦 ساخت آرشیو ترکیبی..."
@@ -264,7 +270,6 @@ jobs:
             fi
           fi
           
-          # ========== فهرست کلی ==========
           {
             echo "# 📥 فایل‌های دانلود شده"
             echo ""
