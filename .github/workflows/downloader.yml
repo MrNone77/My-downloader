@@ -76,61 +76,14 @@ jobs:
           COOKIE_ARG=""
           if [ -f /tmp/cookies.txt ] && [ -s /tmp/cookies.txt ]; then
             COOKIE_ARG="--cookies /tmp/cookies.txt"
-            echo "🍪 استفاده از کوکی"
           fi
           
-          is_youtube() {
-            echo "$1" | grep -qiE "(youtube\.com|youtu\.be)"
+          # تشخیص لینک‌های ویدیویی (شامل Invidious)
+          is_video() {
+            echo "$1" | grep -qiE "(youtube\.com|youtu\.be|invidious|inv\.|yewtu\.be|piped\.|instagram\.com|twitter\.com|x\.com|tiktok\.com|vimeo\.com|dailymotion\.com|twitch\.tv)"
           }
           
-          is_social_media() {
-            echo "$1" | grep -qiE "(instagram\.com|twitter\.com|x\.com|tiktok\.com|facebook\.com|reddit\.com|vimeo\.com|dailymotion\.com|twitch\.tv)"
-          }
-
-          extract_video_id() {
-            local url="$1"
-            if echo "$url" | grep -q "youtu\.be"; then
-              echo "$url" | sed 's|.*youtu\.be/||' | sed 's|[?#].*||'
-            elif echo "$url" | grep -q "v="; then
-              echo "$url" | sed 's|.*v=||' | sed 's|[&#].*||'
-            else
-              echo ""
-            fi
-          }
-          
-          download_normal() {
-            local url="$1"
-            local name="$2"
-            name=$(echo "$name" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
-            
-            echo "⬇️ دانلود معمولی: $name"
-            
-            aria2c -x4 -s4 \
-              --max-tries=3 \
-              --retry-wait=5 \
-              --timeout=120 \
-              --connect-timeout=30 \
-              --check-certificate=false \
-              --allow-overwrite=true \
-              --auto-file-renaming=false \
-              -d "$TMP_DL" \
-              -o "$name" \
-              "$url" 2>/dev/null && return 0
-            
-            echo "🔄 تلاش با curl..."
-            curl -L -f \
-              --retry 3 \
-              --retry-delay 5 \
-              --connect-timeout 30 \
-              --max-time 7200 \
-              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-              -o "$TMP_DL/$name" \
-              "$url" 2>/dev/null && return 0
-            
-            return 1
-          }
-          
-          download_ytdlp() {
+          download_with_ytdlp() {
             local url="$1"
             local prefix="$2"
             
@@ -144,13 +97,49 @@ jobs:
               --no-playlist \
               --merge-output-format mp4 \
               --output "${prefix}_%(title)s.%(ext)s" \
-              --format "best[height<=1080][ext=mp4]/best[ext=mp4]/best" \
-              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-              --retries 5 \
-              --fragment-retries 5 \
-              --socket-timeout 30 \
-              --extractor-retries 3 \
+              --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best[height<=1080]/best" \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              --retries 10 \
+              --fragment-retries 10 \
+              --socket-timeout 60 \
+              --extractor-retries 5 \
+              --force-ipv4 \
               "$url" 2>&1 && return 0
+            
+            return 1
+          }
+          
+          download_direct() {
+            local url="$1"
+            local name="$2"
+            name=$(echo "$name" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
+            
+            echo "⬇️ دانلود مستقیم: $name"
+            
+            aria2c -x4 -s4 \
+              --max-tries=5 \
+              --retry-wait=10 \
+              --timeout=120 \
+              --connect-timeout=30 \
+              --check-certificate=false \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+              -d "$TMP_DL" \
+              -o "$name" \
+              "$url" 2>/dev/null && return 0
+            
+            echo "🔄 تلاش با curl..."
+            curl -L -f \
+              --retry 5 \
+              --retry-delay 10 \
+              --connect-timeout 30 \
+              --max-time 7200 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Accept: */*" \
+              -H "Accept-Language: en-US,en;q=0.9" \
+              -o "$TMP_DL/$name" \
+              "$url" 2>/dev/null && return 0
             
             return 1
           }
@@ -158,6 +147,14 @@ jobs:
           save_file() {
             local file="$1"
             local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+            
+            if [ "$size" -lt 1024 ]; then
+              echo "⚠️ فایل خیلی کوچیکه (${size} بایت) - احتمالاً صفحه وب دانلود شده"
+              echo "🔍 محتوای فایل:"
+              head -c 500 "$file"
+              return 1
+            fi
+            
             local name=$(basename "$file")
             local folder_name="${name%.*}"
             local folder="$STORAGE/$folder_name"
@@ -177,6 +174,7 @@ jobs:
             fi
             
             make_readme "$folder" "$name" "$size"
+            return 0
           }
           
           make_readme() {
@@ -194,7 +192,7 @@ jobs:
             done
             local total_mb=$(echo "scale=2; $total_size / 1048576" | bc)
             
-            cat > "$folder/README.md" << EOF
+            cat > "$folder/README.md" << README_EOF
           # 📁 $original_name
           
           | مشخصات | مقدار |
@@ -213,7 +211,7 @@ jobs:
           
           ---
           📅 تاریخ: $(date '+%Y-%m-%d %H:%M')
-          EOF
+          README_EOF
           }
           
           FAILED=0
@@ -227,22 +225,13 @@ jobs:
             echo "🔗 لینک $COUNT: $url"
             echo "========================================="
             
-            if is_youtube "$url" || is_social_media "$url"; then
-              echo "🎬 تشخیص: ویدیو/شبکه اجتماعی"
+            if is_video "$url"; then
+              echo "🎬 تشخیص: لینک ویدیویی"
               
-              # استخراج video_id قبل از دانلود
-              VIDEO_ID=$(extract_video_id "$url")
-              
-              if download_ytdlp "$url" "$COUNT"; then
-                echo "✅ دانلود موفق"
+              if download_with_ytdlp "$url" "$COUNT"; then
+                echo "✅ yt-dlp موفق بود"
               else
-                echo "❌ دانلود ناموفق"
-                if [ -n "$VIDEO_ID" ]; then
-                  echo ""
-                  echo "💡 از این لینک‌ها استفاده کن:"
-                  echo "   https://inv.nadeko.net/watch?v=$VIDEO_ID"
-                  echo "   https://yewtu.be/watch?v=$VIDEO_ID"
-                fi
+                echo "❌ yt-dlp ناموفق"
                 FAILED=$((FAILED + 1))
                 continue
               fi
@@ -250,50 +239,36 @@ jobs:
               echo "📁 تشخیص: دانلود مستقیم"
               name=$(basename "$url" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
               [ -z "$name" ] && name="file_${COUNT}"
-              if ! download_normal "$url" "$name"; then
-                echo "❌ دانلود ناموفق"
-                FAILED=$((FAILED + 1))
-                continue
+              if ! download_direct "$url" "$name"; then
+                echo "❌ دانلود مستقیم ناموفق - شاید لینک ویدیویی باشه؟"
+                echo "🔄 تلاش با yt-dlp..."
+                if ! download_with_ytdlp "$url" "$COUNT"; then
+                  FAILED=$((FAILED + 1))
+                  continue
+                fi
               fi
             fi
             
+            # ذخیره فایل‌های دانلود شده
+            found=0
             for file in "$TMP_DL"/*; do
               [ -f "$file" ] || continue
               [ ! -s "$file" ] && continue
               
               name=$(basename "$file")
-              echo "✅ ذخیره: $name"
-              save_file "$file"
-              SUCCESS=$((SUCCESS + 1))
+              if save_file "$file"; then
+                echo "✅ ذخیره شد: $name"
+                SUCCESS=$((SUCCESS + 1))
+                found=1
+              fi
             done
+            
+            if [ "$found" -eq 0 ]; then
+              echo "⚠️ هیچ فایلی برای ذخیره پیدا نشد"
+            fi
             
             rm -f "$TMP_DL"/* 2>/dev/null
           done
-          
-          if [ "$MODE" = "zip_together" ] && [ "$SUCCESS" -gt 1 ]; then
-            echo ""
-            echo "📦 ساخت آرشیو ترکیبی..."
-            BUNDLE="bundle_$(date +%Y%m%d_%H%M%S)"
-            BUNDLE_DIR="$STORAGE/$BUNDLE"
-            mkdir -p "$BUNDLE_DIR"
-            
-            all_files=""
-            for d in "$STORAGE"/*/; do
-              [ -d "$d" ] || continue
-              [ "$(basename "$d")" = "$BUNDLE" ] && continue
-              for f in "$d"/*.zip "$d"/*.z"0"*; do
-                [ -f "$f" ] && all_files="$all_files $f"
-              done
-            done
-            
-            if [ -n "$all_files" ]; then
-              cd "$BUNDLE_DIR"
-              [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
-              zip -j $pw_arg -s ${SPLIT_MB}m "$BUNDLE.zip" $all_files 2>/dev/null
-              cd - > /dev/null
-              make_readme "$BUNDLE_DIR" "Combined_Archive.zip" $(du -sb "$STORAGE" | cut -f1)
-            fi
-          fi
           
           {
             echo "# 📥 فایل‌های دانلود شده"
