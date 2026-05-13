@@ -62,26 +62,26 @@ jobs:
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             caomingjun/warp
           
-          echo "⏳ صبر برای آماده‌سازی WARP..."
+          echo "⏳ صبر برای WARP..."
           sleep 15
           
           for i in {1..5}; do
             RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "")
             if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
-              echo "✅ WARP فعال شد"
+              echo "✅ WARP آماده"
               break
             fi
             echo "🔄 تلاش $i/5..."
             sleep 5
           done
 
-      - name: 🔧 Install Dependencies
+      - name: 🔧 Install Tools (Fast)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq python3-pip ffmpeg zip p7zip-full curl bc
-          curl -fsSL https://deno.land/install.sh | sh
+          # فقط چیزایی که واقعاً لازمه - بدون apt-get update
+          sudo apt-get install -y -qq --no-install-recommends python3-pip ffmpeg zip p7zip-full curl 2>/dev/null
+          curl -fsSL https://deno.land/install.sh | sh 2>/dev/null
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
-          pip3 install --upgrade yt-dlp
+          pip3 install -q --no-cache-dir yt-dlp 2>/dev/null
           echo "✅ ابزارها نصب شدن"
 
       - name: 📥 دانلود ویدیو
@@ -101,7 +101,6 @@ jobs:
           STORAGE="/tmp/downloads"
           mkdir -p "$STORAGE"
           
-          # ── تنظیم فرمت ──
           case "$QUALITY" in
             "audio") FORMAT="bestaudio/best";;
             "best")  FORMAT="bestvideo+bestaudio/best";;
@@ -113,43 +112,29 @@ jobs:
             *)       FORMAT="bestvideo+bestaudio/best";;
           esac
           
-          # ── توابع ──
-          urlencode() {
-            python3 -c "import urllib.parse; print(urllib.parse.quote('$1', safe=''))"
-          }
-          
           download_video() {
             local method=$1 url=$2 tmpdir=$3
-            echo "🔄 روش $method..."
             
-            # تنظیمات مشترک
             if [ "$QUALITY" = "audio" ]; then
               COMMON="--extract-audio --audio-format mp3 --audio-quality 0 --output ${tmpdir}/%(title)s.%(ext)s"
             else
               COMMON="--merge-output-format mp4 --output ${tmpdir}/%(title)s.%(ext)s"
             fi
-            
-            COMMON="$COMMON --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --socket-timeout 30 --newline"
+            COMMON="$COMMON --no-playlist --retries 3 --fragment-retries 3 --no-check-certificates --socket-timeout 30 --newline --no-warnings"
             
             case $method in
               1) yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
-                   --extractor-args "youtube:player_client=web" --js-runtimes deno \
-                   --remote-components ejs:github \
-                   --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36" \
-                   "$url" && return 0 ;;
+                   --extractor-args "youtube:player_client=web" --js-runtimes deno "$url" 2>/dev/null && return 0 ;;
               2) yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
-                   --extractor-args "youtube:player_client=mweb" "$url" && return 0 ;;
+                   --extractor-args "youtube:player_client=mweb" "$url" 2>/dev/null && return 0 ;;
               3) yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
-                   --extractor-args "youtube:player_client=android_vr" "$url" && return 0 ;;
-              4) yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
                    --extractor-args "youtube:player_client=android" \
                    --user-agent "Mozilla/5.0 (Linux; Android 12) Chrome/112.0.0.0 Mobile Safari/537.36" \
-                   "$url" && return 0 ;;
+                   "$url" 2>/dev/null && return 0 ;;
+              4) yt-dlp --format "$FORMAT" $COMMON \
+                   --extractor-args "youtube:player_client=web" --js-runtimes deno "$url" 2>/dev/null && return 0 ;;
               5) yt-dlp --format "$FORMAT" $COMMON \
-                   --extractor-args "youtube:player_client=web" --js-runtimes deno \
-                   --remote-components ejs:github "$url" && return 0 ;;
-              6) yt-dlp --format "$FORMAT" $COMMON \
-                   --extractor-args "youtube:player_client=mweb" "$url" && return 0 ;;
+                   --extractor-args "youtube:player_client=mweb" "$url" 2>/dev/null && return 0 ;;
             esac
             return 1
           }
@@ -165,26 +150,19 @@ jobs:
             mkdir -p "$dest"
             
             if [ "$size" -gt "$SPLIT_BYTES" ]; then
-              echo "📦 قطعه‌قطعه: $name ($(( size / 1024 / 1024 ))MB)"
+              echo "📦 قطعه‌قطعه: $name ($(( size / 1048576 ))MB)"
               cd "$dest"
-              if [ -n "$ZIP_PASSWORD" ]; then
-                7z a -tzip -v${SPLIT_MB}m -p"${ZIP_PASSWORD}" -mx=0 "$folder.zip" "$file" 2>/dev/null
-              else
-                zip -0 -s ${SPLIT_MB}m "$folder.zip" "$file" 2>/dev/null
-              fi
+              [ -n "$ZIP_PASSWORD" ] && pw="-p${ZIP_PASSWORD}" || pw=""
+              7z a -tzip -v${SPLIT_MB}m $pw -mx=0 "$folder.zip" "$file" 2>/dev/null
               cd - > /dev/null
             else
-              echo "📦 ذخیره: $name ($(( size / 1024 / 1024 ))MB)"
+              echo "📦 ذخیره: $name ($(( size / 1048576 ))MB)"
               if [ -n "$ZIP_PASSWORD" ]; then
-                zip -P "${ZIP_PASSWORD}" "$dest/$folder.zip" "$file" 2>/dev/null
+                7z a -tzip -p"${ZIP_PASSWORD}" -mx=0 "$dest/$folder.zip" "$file" 2>/dev/null
               else
                 cp "$file" "$dest/$folder.mp4" 2>/dev/null
               fi
             fi
-            
-            # README
-            local parts=$(ls "$dest"/*.zip "$dest"/*.z* 2>/dev/null | wc -l)
-            [ "$parts" -eq 0 ] && parts=1
             
             cat > "$dest/README.md" << EOF
           # 🎬 $name
@@ -192,8 +170,7 @@ jobs:
           | مشخصات | مقدار |
           |---------|-------|
           | **کیفیت** | $QUALITY |
-          | **حجم** | $(( size / 1024 / 1024 )) MB |
-          | **قطعات** | $parts |
+          | **حجم** | $(( size / 1048576 )) MB |
           | **رمز** | $([ -n "$ZIP_PASSWORD" ] && echo "✅ دارد" || echo "❌ ندارد") |
           
           ## 📥 نحوه استخراج
@@ -203,22 +180,20 @@ jobs:
           EOF
           }
           
-          # ── دانلود ──
           SUCCESS=0; FAILED=0
           
           for url in $URLS; do
             echo ""
-            echo "========================================="
             echo "🔗 $url"
-            echo "========================================="
             
             TMPDIR="/tmp/dl_$$"
             mkdir -p "$TMPDIR"
             OK=false
             
-            for m in 1 2 3 4 5 6; do
+            for m in 1 2 3 4 5; do
+              echo "🔄 روش $m..."
               if download_video $m "$url" "$TMPDIR"; then
-                echo "✅ روش $m موفق بود"
+                echo "✅ موفق!"
                 OK=true
                 break
               fi
@@ -228,111 +203,47 @@ jobs:
             if [ "$OK" = true ]; then
               for f in "$TMPDIR"/*; do
                 [ -f "$f" ] || continue
-                if save_file "$f"; then
-                  SUCCESS=$((SUCCESS + 1))
-                fi
+                save_file "$f" && SUCCESS=$((SUCCESS + 1))
               done
             else
               FAILED=$((FAILED + 1))
-              echo "❌ همه روش‌ها ناموفق"
+              echo "❌ ناموفق"
             fi
             
             rm -rf "$TMPDIR"
           done
           
-          echo ""
           echo "✅ $SUCCESS موفق | ❌ $FAILED ناموفق"
-          echo "$STORAGE" > /tmp/storage_path.txt
-
-      - name: 📝 دانلود زیرنویس
-        if: github.event.inputs.download_subtitles == 'true'
-        run: |
-          STORAGE=$(cat /tmp/storage_path.txt)
-          URLS="${{ github.event.inputs.video_urls }}"
-          
-          for url in $URLS; do
-            # پیدا کردن پوشه مرتبط
-            for folder in "$STORAGE"/*/; do
-              [ -d "$folder" ] || continue
-              SUBDIR="$folder/subtitles"
-              mkdir -p "$SUBDIR"
-              
-              echo "📝 زیرنویس برای: $(basename "$folder")"
-              
-              yt-dlp --proxy socks5://127.0.0.1:1080 \
-                --skip-download --write-subs --write-auto-subs \
-                --sub-langs "fa,en" --convert-subs srt \
-                --output "$SUBDIR/%(title)s" \
-                "$url" 2>/dev/null || true
-              
-              if ls "$SUBDIR"/*.srt 2>/dev/null | grep -q .; then
-                cd "$SUBDIR"
-                zip -q "$folder/subtitle.zip" *.srt 2>/dev/null
-                cd - > /dev/null
-                rm -rf "$SUBDIR"
-                echo "✅ زیرنویس آماده شد"
-              else
-                rm -rf "$SUBDIR"
-                echo "⚠️ زیرنویسی پیدا نشد"
-              fi
-              break
-            done
-          done
+          echo "$STORAGE" > /tmp/storage.txt
 
       - name: 🧹 Stop WARP
         if: always()
-        run: |
-          docker stop warp 2>/dev/null || true
-          docker rm warp 2>/dev/null || true
+        run: docker rm -f warp 2>/dev/null || true
 
-      - name: 📤 Push to GitHub
+      - name: 📤 Push
         run: |
-          STORAGE=$(cat /tmp/storage_path.txt)
+          STORAGE=$(cat /tmp/storage.txt)
+          [ ! -d "$STORAGE" ] && exit 0
           
-          if [ ! -d "$STORAGE" ] || [ -z "$(ls -A $STORAGE 2>/dev/null)" ]; then
-            echo "❌ فایلی برای آپلود نیست"
-            exit 1
-          fi
-          
-          # انتقال به پوشه videos
           rm -rf videos
           mkdir -p videos
           cp -r "$STORAGE"/* videos/
           
-          # فهرست کلی
           {
-            echo "# 🎬 ویدیوهای دانلود شده"
-            echo ""
+            echo "# 🎬 دانلودها"
             num=1
             for d in videos/*/; do
-              [ -d "$d" ] || continue
-              dn=$(basename "$d")
-              echo "$num. 📁 \`$dn\`"
-              num=$((num + 1))
+              [ -d "$d" ] && echo "$num. 📁 \`$(basename "$d")\`" && num=$((num + 1))
             done
           } > videos/README.md
           
-          git add videos/ README.md 2>/dev/null
-          
-          git diff --cached --quiet 2>/dev/null && {
-            echo "ℹ️ تغییر جدیدی نیست"
-            exit 0
-          }
-          
-          git commit -m "🎬 دانلود جدید - $(date '+%m/%d %H:%M')"
-          
-          for i in 1 2 3 4 5; do
-            echo "🔄 push $i..."
-            if git pull --rebase origin main 2>/dev/null && git push origin main 2>&1; then
-              echo "✅ آپلود موفق"
-              break
-            fi
-            sleep 5
-          done
+          git add videos/ 2>/dev/null
+          git diff --cached --quiet 2>/dev/null && exit 0
+          git commit -m "🎬 $(date '+%m/%d %H:%M')"
+          git pull --rebase origin main 2>/dev/null || true
+          git push origin main 2>/dev/null || (git pull --rebase origin main && git push origin main)
 
       - name: 🎉 Done
         run: |
-          echo "========================================="
           echo "✅ تموم شد!"
           echo "🔗 ${{ github.server_url }}/${{ github.repository }}/tree/main/videos"
-          echo "========================================="
