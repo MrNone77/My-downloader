@@ -40,17 +40,23 @@ jobs:
 
       - name: 🚀 Start Cloudflare WARP Proxy
         run: |
-          echo "🚀 راه‌اندازی WARP..."
-          docker run -d \
-            --name warp \
-            -p 1080:1080 \
-            --cap-add NET_ADMIN \
-            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-            caomingjun/warp
-          
-          echo "⏳ صبر برای WARP..."
-          sleep 15
+          # اگه WARP already running باشه، restart نکن
+          if docker ps --format '{{.Names}}' | grep -q "^warp$"; then
+            echo "✅ WARP از قبل فعال بود"
+          else
+            docker rm -f warp 2>/dev/null || true
+            echo "🚀 راه‌اندازی WARP..."
+            docker run -d \
+              --name warp \
+              -p 1080:1080 \
+              --cap-add NET_ADMIN \
+              --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+              --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+              caomingjun/warp
+            
+            echo "⏳ صبر برای WARP..."
+            sleep 15
+          fi
           
           for i in {1..5}; do
             RESULT=$(curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "")
@@ -59,16 +65,80 @@ jobs:
               break
             fi
             echo "🔄 تلاش $i/5..."
-            sleep 5
+            sleep 3
           done
 
-      - name: 🔧 Install Tools (Fast)
+      - name: 🔧 Install Tools (Check First)
         run: |
-          sudo apt-get install -y -qq --no-install-recommends python3-pip ffmpeg zip p7zip-full curl 2>/dev/null
-          curl -fsSL https://deno.land/install.sh | sh 2>/dev/null
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-          pip3 install -q --no-cache-dir yt-dlp 2>/dev/null
-          echo "✅ ابزارها نصب شدن"
+          echo "🔍 بررسی وضعیت ابزارها..."
+          
+          MISSING=""
+          
+          # Check ffmpeg
+          if command -v ffmpeg &>/dev/null; then
+            echo "✅ ffmpeg: نصب است"
+          else
+            echo "❌ ffmpeg: نیست"
+            MISSING="$MISSING ffmpeg"
+          fi
+          
+          # Check yt-dlp
+          if command -v yt-dlp &>/dev/null; then
+            echo "✅ yt-dlp: نصب است"
+          else
+            echo "❌ yt-dlp: نیست"
+            MISSING="$MISSING yt-dlp"
+          fi
+          
+          # Check 7z
+          if command -v 7z &>/dev/null; then
+            echo "✅ 7z: نصب است"
+          else
+            echo "❌ 7z: نیست"
+            MISSING="$MISSING p7zip-full"
+          fi
+          
+          # Check zip
+          if command -v zip &>/dev/null; then
+            echo "✅ zip: نصب است"
+          else
+            echo "❌ zip: نیست"
+            MISSING="$MISSING zip"
+          fi
+          
+          # Check deno
+          if command -v deno &>/dev/null || [ -f "$HOME/.deno/bin/deno" ]; then
+            echo "✅ deno: نصب است"
+            export PATH="$HOME/.deno/bin:$PATH"
+          else
+            echo "❌ deno: نیست"
+            NEED_DENO=true
+          fi
+          
+          # Install only what's missing
+          if [ -n "$MISSING" ] || [ "$NEED_DENO" = true ]; then
+            echo ""
+            echo "📦 نصب موارد ضروری..."
+            
+            if [ -n "$MISSING" ]; then
+              sudo apt-get install -y -qq --no-install-recommends $MISSING 2>/dev/null
+            fi
+            
+            if [ "$NEED_DENO" = true ]; then
+              curl -fsSL https://deno.land/install.sh | sh 2>/dev/null
+              echo "$HOME/.deno/bin" >> $GITHUB_PATH
+            fi
+            
+            # pip فقط اگه yt-dlp نبود
+            if echo "$MISSING" | grep -q "yt-dlp"; then
+              pip3 install -q --no-cache-dir yt-dlp 2>/dev/null
+            fi
+            
+            echo "✅ نصب تموم شد"
+          else
+            echo ""
+            echo "✅ همه ابزارها از قبل نصب بودن - رد میشیم"
+          fi
 
       - name: 📥 دانلود ویدیو
         env:
@@ -85,10 +155,10 @@ jobs:
           STORAGE="/tmp/downloads"
           mkdir -p "$STORAGE"
           
-          # ⭐️ حداقل 720p - بهترین کیفیت از 1080p تا 720p
-          FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best"
+          export PATH="$HOME/.deno/bin:$PATH"
           
-          echo "🎯 فرمت: حداقل 720p (بهترین کیفیت موجود)"
+          FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best"
+          echo "🎯 حداقل 720p | بهترین کیفیت موجود"
           
           download_video() {
             local method=$1 url=$2 tmpdir=$3
