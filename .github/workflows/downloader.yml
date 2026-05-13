@@ -1,4 +1,4 @@
-name: "📥 My Personal Downloader"
+name: "📥 YouTube Downloader Pro"
 
 on:
   workflow_dispatch:
@@ -7,8 +7,20 @@ on:
         description: '🔗 لینک های دانلود (با فاصله جدا کنید)'
         required: true
         type: string
+      quality:
+        description: '🎯 کیفیت'
+        required: false
+        default: 'best'
+        type: choice
+        options:
+          - best
+          - 1080p
+          - 720p
+          - 480p
+          - 360p
+          - audio_only
       mode:
-        description: '📦 حالت ذخیره سازی'
+        description: '📦 حالت ذخیره'
         required: false
         default: 'separate'
         type: choice
@@ -20,17 +32,30 @@ on:
         required: false
         default: ''
         type: string
+      subtitle:
+        description: '📝 دانلود زیرنویس'
+        required: false
+        default: 'no'
+        type: choice
+        options:
+          - 'no'
+          - 'yes'
+      folder:
+        description: '📁 نام پوشه (اختیاری)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   downloader:
-    name: "📥 دانلود و آپلود فایل"
+    name: "📥 دانلود و آپلود"
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
       contents: write
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -46,9 +71,7 @@ jobs:
         run: |
           if [ -n "$COOKIES" ]; then
             echo "$COOKIES" > /tmp/cookies.txt
-            echo "✅ کوکی آماده شد"
-          else
-            echo "ℹ️ کوکی تنظیم نشده"
+            echo "✅ کوکی فعال"
           fi
         env:
           COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
@@ -59,12 +82,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: 📥 Download & Process Files
+      - name: 📥 Download & Process
         id: download
         run: |
           URLS="${{ github.event.inputs.urls }}"
           MODE="${{ github.event.inputs.mode }}"
           ZIP_PASS="${{ github.event.inputs.zip_password }}"
+          QUALITY="${{ github.event.inputs.quality }}"
+          SUBTITLE="${{ github.event.inputs.subtitle }}"
+          FOLDER_NAME="${{ github.event.inputs.folder }}"
           
           SPLIT_MB=45
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
@@ -73,113 +99,145 @@ jobs:
           TMP_DL="/tmp/downloads_temp"
           mkdir -p "$STORAGE" "$TMP_DL"
           
+          # تنظیم کیفیت
+          case "$QUALITY" in
+            "best") FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" ;;
+            "1080p") FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best" ;;
+            "720p") FORMAT="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" ;;
+            "480p") FORMAT="bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best" ;;
+            "360p") FORMAT="bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best" ;;
+            "audio_only") FORMAT="bestaudio[ext=m4a]/bestaudio" ;;
+            *) FORMAT="best[height<=1080]/best" ;;
+          esac
+          
+          # آرگومان کوکی
           COOKIE_ARG=""
-          [ -f /tmp/cookies.txt ] && [ -s /tmp/cookies.txt ] && COOKIE_ARG="--cookies /tmp/cookies.txt"
+          [ -f /tmp/cookies.txt ] && COOKIE_ARG="--cookies /tmp/cookies.txt"
           
-          INVIDIOUS_SERVERS=(
-            "https://yewtu.be"
-            "https://vid.puffyan.us"
-            "https://inv.zzls.xyz"
-            "https://invidious.slipfox.xyz"
-            "https://iv.melmac.space"
-            "https://inv.nadeko.net"
-          )
-          
-          is_video() {
-            echo "$1" | grep -qiE "(youtube\.com|youtu\.be|invidious|inv\.|yewtu\.be|piped\.|vid\.puffyan|instagram\.com|twitter\.com|x\.com|tiktok\.com|vimeo\.com|dailymotion\.com|twitch\.tv)"
-          }
-          
-          extract_youtube_id() {
-            local url="$1"
-            local id=""
-            if echo "$url" | grep -qE "youtu\.be/"; then
-              id=$(echo "$url" | sed 's|.*youtu\.be/||' | sed 's|[?#].*||')
-            elif echo "$url" | grep -qE "watch\?v="; then
-              id=$(echo "$url" | sed 's|.*watch?v=||' | sed 's|[&#].*||')
-            elif echo "$url" | grep -qE "/watch/"; then
-              id=$(echo "$url" | sed 's|.*/watch/||' | sed 's|[?#/].*||')
-            fi
-            [ ${#id} -eq 11 ] && echo "$id" || echo ""
-          }
-          
-          try_invidious_servers() {
-            local video_id="$1"
-            local prefix="$2"
-            for server in "${INVIDIOUS_SERVERS[@]}"; do
-              echo "🔄 تلاش با سرور: $server"
-              cd "$TMP_DL"
-              if yt-dlp \
-                --no-warnings \
-                --no-playlist \
-                --merge-output-format mp4 \
-                --output "${prefix}_%(title)s.%(ext)s" \
-                --format "best[height<=1080]/best" \
-                --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-                --retries 3 \
-                --socket-timeout 30 \
-                --force-ipv4 \
-                "${server}/watch?v=${video_id}" 2>&1; then
-                echo "✅ موفق با سرور: $server"
-                return 0
-              fi
-              cd - > /dev/null
-            done
-            return 1
-          }
-          
-          download_ytdlp() {
+          # ==== تابع Bypass ====
+          bypass_download() {
             local url="$1"
             local prefix="$2"
-            echo "🎬 دانلود با yt-dlp: $url"
+            
+            echo "🔄 تلاش Bypass با روش 1..."
             cd "$TMP_DL"
+            
+            # روش 1: با User-Agent موبایل
             yt-dlp \
               $COOKIE_ARG \
               --no-warnings \
               --no-playlist \
               --merge-output-format mp4 \
               --output "${prefix}_%(title)s.%(ext)s" \
-              --format "best[height<=1080]/best" \
-              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              --format "$FORMAT" \
+              --user-agent "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36" \
+              --extractor-retries 5 \
               --retries 5 \
               --fragment-retries 5 \
-              --socket-timeout 60 \
-              --extractor-retries 3 \
+              --socket-timeout 30 \
               --force-ipv4 \
-              --no-check-certificates \
               "$url" 2>&1 && return 0
+            
+            echo "❌ روش 1 ناموفق"
+            echo "🔄 تلاش Bypass با روش 2 (بدون کوکی)..."
+            
+            # روش 2: بدون کوکی با User-Agent دسکتاپ
+            yt-dlp \
+              --no-warnings \
+              --no-playlist \
+              --merge-output-format mp4 \
+              --output "${prefix}_%(title)s.%(ext)s" \
+              --format "best[height<=720]/best" \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+              --extractor-retries 5 \
+              --retries 5 \
+              --fragment-retries 5 \
+              --socket-timeout 30 \
+              --force-ipv4 \
+              "$url" 2>&1 && return 0
+            
+            echo "❌ روش 2 ناموفق"
+            echo "🔄 تلاش Bypass با روش 3 (Invidious)..."
+            
+            # روش 3: Invidious
+            local video_id=$(echo "$url" | sed 's|.*v=||' | sed 's|[&#].*||')
+            if [ -n "$video_id" ]; then
+              for server in \
+                "https://yewtu.be" \
+                "https://inv.nadeko.net" \
+                "https://vid.puffyan.us"; do
+                echo "🔄 $server/watch?v=$video_id"
+                if yt-dlp \
+                  --no-warnings \
+                  --no-playlist \
+                  --merge-output-format mp4 \
+                  --output "${prefix}_%(title)s.%(ext)s" \
+                  --format "best[height<=720]/best" \
+                  --user-agent "Mozilla/5.0" \
+                  --retries 3 \
+                  --socket-timeout 30 \
+                  --force-ipv4 \
+                  "$server/watch?v=$video_id" 2>&1; then
+                  return 0
+                fi
+              done
+            fi
+            
             return 1
           }
           
-          download_direct() {
+          # ==== دانلود زیرنویس ====
+          download_subs() {
+            local url="$1"
+            local output_dir="$2"
+            
+            echo "📝 دانلود زیرنویس..."
+            cd "$output_dir"
+            
+            yt-dlp \
+              $COOKIE_ARG \
+              --skip-download \
+              --write-subs \
+              --write-auto-subs \
+              --sub-langs "fa,en,ar,zh,ko,ja,fr,de,es" \
+              --convert-subs srt \
+              --output "%(title)s" \
+              "$url" 2>/dev/null
+            
+            if ls *.srt *.vtt 2>/dev/null | grep -q .; then
+              echo "📦 بسته‌بندی زیرنویس‌ها..."
+              zip -q subtitle.zip *.srt *.vtt 2>/dev/null
+              rm -f *.srt *.vtt
+              echo "✅ زیرنویس آماده شد"
+            else
+              echo "⚠️ زیرنویسی پیدا نشد"
+            fi
+            cd - > /dev/null
+          }
+          
+          # ==== دانلود مستقیم (برای لینک‌های غیر ویدیویی) ====
+          direct_download() {
             local url="$1"
             local name="$2"
-            name=$(echo "$name" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
             echo "⬇️ دانلود مستقیم: $name"
-            curl -L -f \
-              --retry 5 \
-              --retry-delay 5 \
-              --connect-timeout 30 \
-              --max-time 7200 \
-              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -H "Accept: */*" \
-              -o "$TMP_DL/$name" \
-              "$url" 2>/dev/null && return 0
+            curl -L -f --retry 5 --connect-timeout 30 --max-time 7200 \
+              -A "Mozilla/5.0" -o "$TMP_DL/$name" "$url" 2>/dev/null && return 0
             return 1
           }
           
+          # ==== ذخیره فایل ====
           save_file() {
             local file="$1"
             local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
-            if [ "$size" -lt 10000 ]; then
-              echo "⚠️ فایل مشکوکه (فقط ${size} بایت)"
-              return 1
-            fi
+            [ "$size" -lt 10000 ] && { echo "⚠️ فایل خیلی کوچیکه"; return 1; }
+            
             local name=$(basename "$file")
             local folder_name="${name%.*}"
             local folder="$STORAGE/$folder_name"
             mkdir -p "$folder"
+            
             if [ "$size" -gt "$SPLIT_BYTES" ]; then
-              echo "📦 قطعه قطعه کردن: $name ($(( size / 1024 / 1024 ))MB)"
+              echo "📦 قطعه‌قطعه: $name ($(( size / 1024 / 1024 ))MB)"
               cd "$folder"
               [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
               zip -j $pw_arg -s ${SPLIT_MB}m "$folder_name.zip" "$file" 2>/dev/null
@@ -189,108 +247,99 @@ jobs:
               [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
               zip -j $pw_arg "$folder/$folder_name.zip" "$file" 2>/dev/null
             fi
-            make_readme "$folder" "$name" "$size"
-            return 0
-          }
-          
-          make_readme() {
-            local folder="$1"
-            local original_name="$2"
-            local folder_name=$(basename "$folder")
-            local part_count=0
-            local total_size=0
+            
+            # README
+            local part_count=0; local total_size=0
             for p in "$folder"/*.zip "$folder"/*.z"0"* "$folder"/*.z"1"*; do
               [ -f "$p" ] || continue
               part_count=$((part_count + 1))
-              total_size=$((total_size + $(stat -c%s "$p" 2>/dev/null || echo 0)))
+              total_size=$((total_size + $(stat -c%s "$p")))
             done
             local total_mb=$(echo "scale=2; $total_size / 1048576" | bc)
-            cat > "$folder/README.md" << README_EOF
-          # 📁 $original_name
+            
+            cat > "$folder/README.md" << EOF
+          # 📁 $name
           
           | مشخصات | مقدار |
           |---------|-------|
-          | **فایل اصلی** | \`$original_name\` |
-          | **حجم کل** | $total_mb MB |
-          | **تعداد قطعات** | $part_count |
-          | **رمز عبور** | $([ -n "$ZIP_PASS" ] && echo "✅ دارد" || echo "❌ ندارد") |
+          | **حجم** | $total_mb MB |
+          | **قطعات** | $part_count |
+          | **رمز** | $([ -n "$ZIP_PASS" ] && echo "✅ دارد" || echo "❌ ندارد") |
           
-          ## 📥 نحوه استخراج
-          
-          1. تمام قطعات را دانلود کنید
-          2. فایل \`$folder_name.zip\` را با WinRAR یا 7-Zip باز کنید
-          3. Extract کنید
-          $([ -n "$ZIP_PASS" ] && echo "4. رمز عبور را وارد کنید")
-          README_EOF
+          ## نحوه استخراج
+          1. همه قطعات رو دانلود کن
+          2. فایل \`$folder_name.zip\` رو با WinRAR/7-Zip باز کن
+          $([ -n "$ZIP_PASS" ] && echo "3. رمز رو وارد کن")
+          EOF
+            return 0
           }
           
-          SUCCESS=0
-          FAILED=0
-          COUNT=0
+          # ==== اجرای اصلی ====
+          SUCCESS=0; FAILED=0; COUNT=0
           
           for url in $URLS; do
             COUNT=$((COUNT + 1))
             echo ""
             echo "========================================="
-            echo "🔗 لینک $COUNT: $url"
+            echo "🔗 #$COUNT: $url"
             echo "========================================="
             
-            VIDEO_ID=$(extract_youtube_id "$url")
-            DOWNLOADED=false
+            is_yt=$(echo "$url" | grep -qiE "(youtube\.com|youtu\.be)" && echo "yes" || echo "no")
             
-            if [ -n "$VIDEO_ID" ]; then
-              echo "🎯 ویدیو YouTube شناسایی شد: $VIDEO_ID"
-              echo "🔄 تلاش مستقیم با yt-dlp..."
-              if download_ytdlp "$url" "$COUNT"; then
-                DOWNLOADED=true
+            if [ "$is_yt" = "yes" ] || echo "$url" | grep -qiE "(instagram|twitter|tiktok|vimeo)"; then
+              echo "🎬 لینک ویدیویی"
+              
+              if bypass_download "$url" "$COUNT"; then
+                echo "✅ دانلود موفق"
               else
-                echo "❌ دانلود مستقیم ناموفق"
-                echo "🔄 تلاش با سرورهای Invidious..."
-                if try_invidious_servers "$VIDEO_ID" "$COUNT"; then
-                  DOWNLOADED=true
-                else
-                  echo "❌ تمام سرورهای Invidious ناموفق بودن"
-                fi
-              fi
-            elif is_video "$url"; then
-              if download_ytdlp "$url" "$COUNT"; then
-                DOWNLOADED=true
+                echo "❌ تمام روش‌های bypass ناموفق"
+                FAILED=$((FAILED + 1))
+                continue
               fi
             else
-              echo "📁 دانلود مستقیم..."
-              name="file_${COUNT}"
-              if download_direct "$url" "$name"; then
-                DOWNLOADED=true
+              name=$(basename "$url" | sed 's/[?#].*//')
+              if direct_download "$url" "${name:-file_$COUNT}"; then
+                echo "✅ دانلود مستقیم موفق"
+              else
+                echo "🔄 امتحان با yt-dlp..."
+                if ! bypass_download "$url" "$COUNT"; then
+                  FAILED=$((FAILED + 1))
+                  continue
+                fi
               fi
             fi
             
-            if [ "$DOWNLOADED" = true ]; then
-              for file in "$TMP_DL"/*; do
-                [ -f "$file" ] || continue
-                [ ! -s "$file" ] && continue
-                name=$(basename "$file")
-                if save_file "$file"; then
-                  echo "✅ ذخیره شد: $name"
-                  SUCCESS=$((SUCCESS + 1))
+            # ذخیره فایل‌ها
+            for file in "$TMP_DL"/*; do
+              [ -f "$file" ] || continue
+              if save_file "$file"; then
+                SUCCESS=$((SUCCESS + 1))
+                
+                # زیرنویس
+                if [ "$SUBTITLE" = "yes" ]; then
+                  folder=$(ls -td "$STORAGE"/*/ | head -1)
+                  download_subs "$url" "$folder"
                 fi
-              done
-            else
-              FAILED=$((FAILED + 1))
-            fi
+              fi
+            done
             rm -f "$TMP_DL"/* 2>/dev/null
           done
           
+          # ==== Zip ترکیبی ====
+          if [ "$MODE" = "zip_together" ] && [ "$SUCCESS" -gt 1 ]; then
+            echo "📦 آرشیو ترکیبی..."
+            BUNDLE="bundle_$(date +%Y%m%d_%H%M%S)"
+            mkdir -p "$STORAGE/$BUNDLE"
+            find "$STORAGE" -type f \( -name "*.zip" -o -name "*.z*" \) ! -path "*/$BUNDLE/*" | xargs -I{} cp {} "$STORAGE/$BUNDLE/"
+          fi
+          
+          # ==== فهرست ====
           {
-            echo "# 📥 فایل‌های دانلود شده"
+            echo "# 📥 فایل‌ها"
             echo ""
-            echo "| # | پوشه |"
-            echo "|---|-------|"
-            num=1
-            for d in "$STORAGE"/*/; do
-              [ -d "$d" ] || continue
+            find "$STORAGE" -mindepth 1 -maxdepth 1 -type d | while read d; do
               dn=$(basename "$d")
-              echo "| $num | \`$dn\` |"
-              num=$((num + 1))
+              echo "- 📁 \`$dn\`"
             done
           } > "$STORAGE/README.md"
           
@@ -300,33 +349,24 @@ jobs:
           echo "========================================="
           echo "storage=$STORAGE" >> $GITHUB_OUTPUT
 
-      - name: 📤 Push to GitHub
+      - name: 📤 Push
         run: |
           STORAGE="/tmp/storage"
-          if [ ! -d "$STORAGE" ] || [ -z "$(ls -A $STORAGE 2>/dev/null)" ]; then
-            echo "ℹ️ فایلی برای آپلود نیست"
-            exit 1
-          fi
+          [ ! -d "$STORAGE" ] && exit 0
           rm -rf downloads
           mkdir -p downloads
           cp -r "$STORAGE"/* downloads/
-          git add downloads/ 2>/dev/null
-          git add README.md 2>/dev/null
-          if git diff --cached --quiet 2>/dev/null; then
-            echo "ℹ️ تغییر جدیدی نیست"
-            exit 0
-          fi
-          git commit -m "📥 دانلود جدید - $(date '+%m/%d %H:%M')" 2>/dev/null
+          git add downloads/ README.md 2>/dev/null
+          git diff --cached --quiet 2>/dev/null && exit 0
+          git commit -m "📥 $(date '+%m/%d %H:%M')"
           git pull --rebase origin main 2>/dev/null || true
-          git push origin main 2>&1 || {
-            git pull --rebase origin main
-            git push origin main
+          git push origin main 2>/dev/null || {
+            git pull --rebase origin main && git push origin main
           }
-          echo "✅ آپلود موفق!"
 
-      - name: 🎉 نتیجه
+      - name: 🎉 Done
         run: |
           echo "========================================="
-          echo "✅ انجام شد!"
+          echo "✅ تموم شد!"
           echo "🔗 ${{ github.server_url }}/${{ github.repository }}/tree/main/downloads"
           echo "========================================="
