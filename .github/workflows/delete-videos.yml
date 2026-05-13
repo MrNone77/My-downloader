@@ -1,0 +1,81 @@
+name: "🗑️ حذف ویدیوها"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_delete:
+        description: '⚠️ با زدن این تیک تمام ویدیوها حذف میشوند'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  delete-videos:
+    name: "🗑️ حذف همه ویدیوها"
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm_delete == 'true' }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: ⚙️ Git Config
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 🗑️ حذف پوشه videos
+        run: |
+          echo "🗑️ در حال حذف تمام ویدیوها..."
+          
+          if [ -d "videos" ]; then
+            rm -rf videos
+            echo "✅ پوشه videos حذف شد"
+          else
+            echo "ℹ️ پوشه videos وجود نداشت"
+          fi
+          
+          mkdir -p videos
+          
+          cat > videos/README.md << EOF
+          # 🎬 ویدیوهای دانلود شده
+          
+          هنوز هیچ ویدیویی دانلود نشده.
+          
+          برو به **Actions → YouTube Downloader Pro** و اولین ویدیو رو دانلود کن.
+          EOF
+          
+          echo "✅ پوشه videos خالی بازسازی شد"
+          
+          git add -f videos/
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "🗑️ حذف تمام ویدیوها"
+            
+            for i in 1 2 3; do
+              echo "🔄 push $i..."
+              if git push origin main 2>&1; then
+                echo ""
+                echo "✅ تمام ویدیوها با موفقیت حذف شدند!"
+                break
+              fi
+              sleep 3
+            done
+          else
+            echo "ℹ️ تغییری برای commit وجود ندارد"
+          fi
+
+  not-confirmed:
+    name: "❌ لغو شد"
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm_delete != 'true' }}
+    steps:
+      - name: پیام لغو
+        run: |
+          echo ""
+          echo "❌ عملیات لغو شد"
+          echo "⚠️ برای حذف ویدیوها باید تیک تأیید را بزنی"
