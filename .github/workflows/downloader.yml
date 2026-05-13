@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: '🔗 لینک های دانلود (با فاصله جدا کنید)'
+        description: '🔗 لینک های دانلود (با فاصله جدا کنید - یوتیوب هم پشتیبانی میشه)'
         required: true
         type: string
       mode:
@@ -25,7 +25,7 @@ jobs:
   downloader:
     name: "📥 دانلود و آپلود فایل"
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     permissions:
       contents: write
 
@@ -38,8 +38,9 @@ jobs:
       - name: 🔧 Install Tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 zip curl bc
-          echo "✅ ابزارها نصب شدن"
+          sudo apt-get install -y -qq aria2 zip curl bc python3 python3-pip ffmpeg
+          pip3 install yt-dlp
+          echo "✅ ابزارها نصب شدن (yt-dlp + ffmpeg + aria2)"
 
       - name: ⚙️ Configure Git
         run: |
@@ -61,17 +62,27 @@ jobs:
           TMP_DL="/tmp/downloads_temp"
           mkdir -p "$STORAGE" "$TMP_DL"
           
-          download() {
+          # ========== تشخیص نوع لینک ==========
+          is_youtube() {
+            echo "$1" | grep -qiE "(youtube\.com|youtu\.be)"
+          }
+          
+          is_social_media() {
+            echo "$1" | grep -qiE "(instagram\.com|twitter\.com|x\.com|tiktok\.com|facebook\.com|reddit\.com|vimeo\.com|dailymotion\.com|twitch\.tv)"
+          }
+          
+          # ========== دانلود معمولی ==========
+          download_normal() {
             local url="$1"
             local name="$2"
             name=$(echo "$name" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
             
-            echo "⬇️ دانلود: $name"
+            echo "⬇️ دانلود معمولی: $name"
             
-            aria2c -x2 -s2 \
+            aria2c -x4 -s4 \
               --max-tries=3 \
               --retry-wait=5 \
-              --timeout=60 \
+              --timeout=120 \
               --connect-timeout=30 \
               --check-certificate=false \
               --allow-overwrite=true \
@@ -85,14 +96,39 @@ jobs:
               --retry 3 \
               --retry-delay 5 \
               --connect-timeout 30 \
-              --max-time 3600 \
-              -A "Mozilla/5.0" \
+              --max-time 7200 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
               -o "$TMP_DL/$name" \
               "$url" 2>/dev/null && return 0
             
             return 1
           }
           
+          # ========== دانلود با yt-dlp (یوتیوب و شبکه‌های اجتماعی) ==========
+          download_ytdlp() {
+            local url="$1"
+            local prefix="$2"
+            
+            echo "🎬 دانلود با yt-dlp: $url"
+            
+            cd "$TMP_DL"
+            
+            yt-dlp \
+              --no-warnings \
+              --no-playlist \
+              --merge-output-format mp4 \
+              --output "${prefix}_%(title)s.%(ext)s" \
+              --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+              --retries 5 \
+              --fragment-retries 5 \
+              --socket-timeout 30 \
+              "$url" 2>&1 && return 0
+            
+            return 1
+          }
+          
+          # ========== ذخیره فایل ==========
           save_file() {
             local file="$1"
             local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
@@ -117,12 +153,12 @@ jobs:
             make_readme "$folder" "$name" "$size"
           }
           
+          # ========== ساخت README ==========
           make_readme() {
             local folder="$1"
             local original_name="$2"
             local original_size="$3"
             local folder_name=$(basename "$folder")
-            local size_mb=$(echo "scale=2; $original_size / 1048576" | bc)
             
             local part_count=0
             local total_size=0
@@ -155,47 +191,80 @@ jobs:
           EOF
           }
           
+          # ========== اجرای اصلی ==========
           FAILED=0
           SUCCESS=0
+          COUNT=0
           
           for url in $URLS; do
-            name=$(basename "$url" | sed 's/%20/ /g')
+            COUNT=$((COUNT + 1))
+            echo ""
+            echo "========================================="
+            echo "🔗 لینک $COUNT: $url"
+            echo "========================================="
             
-            if download "$url" "$name"; then
-              if [ -f "$TMP_DL/$name" ] && [ -s "$TMP_DL/$name" ]; then
-                save_file "$TMP_DL/$name"
-                SUCCESS=$((SUCCESS + 1))
-                echo "✅ $name"
+            if is_youtube "$url" || is_social_media "$url"; then
+              echo "🎬 تشخیص: ویدیو/شبکه اجتماعی"
+              if download_ytdlp "$url" "$COUNT"; then
+                echo "✅ yt-dlp موفق بود"
               else
+                echo "❌ yt-dlp ناموفق"
                 FAILED=$((FAILED + 1))
-                echo "❌ فایل خالی: $name"
+                continue
               fi
             else
-              FAILED=$((FAILED + 1))
-              echo "❌ خطا در دانلود: $name"
+              echo "📁 تشخیص: دانلود مستقیم"
+              name=$(basename "$url" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
+              [ -z "$name" ] && name="file_${COUNT}"
+              if ! download_normal "$url" "$name"; then
+                echo "❌ دانلود ناموفق"
+                FAILED=$((FAILED + 1))
+                continue
+              fi
             fi
-            echo ""
+            
+            # پردازش فایل‌های دانلود شده
+            for file in "$TMP_DL"/*; do
+              [ -f "$file" ] || continue
+              [ ! -s "$file" ] && continue
+              
+              name=$(basename "$file")
+              echo "✅ ذخیره: $name"
+              save_file "$file"
+              SUCCESS=$((SUCCESS + 1))
+            done
+            
+            # پاکسازی برای لینک بعدی
+            rm -f "$TMP_DL"/* 2>/dev/null
           done
           
-          if [ "$MODE" = "zip_together" ] && [ "$SUCCESS" -gt 0 ]; then
+          # ========== زیپ ترکیبی ==========
+          if [ "$MODE" = "zip_together" ] && [ "$SUCCESS" -gt 1 ]; then
+            echo ""
             echo "📦 ساخت آرشیو ترکیبی..."
             BUNDLE="bundle_$(date +%Y%m%d_%H%M%S)"
-            mkdir -p "$STORAGE/$BUNDLE"
-            cd "$STORAGE/$BUNDLE"
+            BUNDLE_DIR="$STORAGE/$BUNDLE"
+            mkdir -p "$BUNDLE_DIR"
             
             all_files=""
-            for f in "$TMP_DL"/*; do
-              [ -f "$f" ] && [ -s "$f" ] && all_files="$all_files $f"
+            for d in "$STORAGE"/*/; do
+              [ -d "$d" ] || continue
+              [ "$(basename "$d")" = "$BUNDLE" ] && continue
+              for f in "$d"/*.zip "$d"/*.z"0"*; do
+                [ -f "$f" ] && all_files="$all_files $f"
+              done
             done
             
             if [ -n "$all_files" ]; then
+              cd "$BUNDLE_DIR"
               [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
               zip -j $pw_arg -s ${SPLIT_MB}m "$BUNDLE.zip" $all_files 2>/dev/null
-              make_readme "$STORAGE/$BUNDLE" "Combined_Archive.zip" $(du -sb "$TMP_DL" | cut -f1)
+              cd - > /dev/null
+              make_readme "$BUNDLE_DIR" "Combined_Archive.zip" $(du -sb "$STORAGE" | cut -f1)
             fi
-            cd - > /dev/null
           fi
           
+          # ========== فهرست کلی ==========
           {
             echo "# 📥 فایل‌های دانلود شده"
             echo ""
@@ -213,7 +282,10 @@ jobs:
             echo "📅 آخرین به‌روزرسانی: $(date '+%Y-%m-%d %H:%M')"
           } > "$STORAGE/README.md"
           
+          echo ""
+          echo "========================================="
           echo "✅ دانلود تموم شد: $SUCCESS موفق | $FAILED ناموفق"
+          echo "========================================="
           echo "storage=$STORAGE" >> $GITHUB_OUTPUT
 
       - name: 📤 Push to GitHub
