@@ -43,10 +43,15 @@ jobs:
           echo "✅ ابزارها نصب شدن"
 
       - name: 🍪 Setup Cookies
-        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
         run: |
-          echo "${{ secrets.YOUTUBE_COOKIES }}" > /tmp/cookies.txt
-          echo "✅ کوکی آماده شد"
+          if [ -n "$COOKIES" ]; then
+            echo "$COOKIES" > /tmp/cookies.txt
+            echo "✅ کوکی آماده شد"
+          else
+            echo "ℹ️ کوکی تنظیم نشده - برای یوتیوب از Invidious استفاده کن"
+          fi
+        env:
+          COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
 
       - name: ⚙️ Configure Git
         run: |
@@ -216,8 +221,9 @@ jobs:
               if download_ytdlp "$url" "$COUNT"; then
                 echo "✅ yt-dlp موفق بود"
               else
-                echo "❌ yt-dlp ناموفق - میتونی از Invidious استفاده کنی:"
-                echo "   https://inv.nadeko.net/watch?v=$(echo "$url" | grep -oP '(?:v=|youtu\.be/)[^&\s]+' | head -1)"
+                echo "❌ yt-dlp ناموفق"
+                echo "💡 پیشنهاد: از Invidious استفاده کن"
+                echo "   https://inv.nadeko.net/watch?v=$(echo "$url" | grep -oP 'v=[^&\s]+' | cut -c3-)"
                 FAILED=$((FAILED + 1))
                 continue
               fi
