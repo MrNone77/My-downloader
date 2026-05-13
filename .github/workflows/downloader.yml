@@ -7,19 +7,6 @@ on:
         description: '🔗 لینک ویدیو (چند لینک با فاصله)'
         required: true
         type: string
-      quality:
-        description: '🎬 کیفیت'
-        required: false
-        default: 'best'
-        type: choice
-        options:
-          - best
-          - 2160
-          - 1440
-          - 1080
-          - 720
-          - 480
-          - audio
       download_subtitles:
         description: '📝 زیرنویس فارسی و انگلیسی'
         required: false
@@ -86,84 +73,47 @@ jobs:
       - name: 📥 دانلود ویدیو
         env:
           YT_URLS: ${{ github.event.inputs.video_urls }}
-          YT_QUALITY: ${{ github.event.inputs.quality }}
           YT_PASSWORD: ${{ github.event.inputs.password }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           BRANCH: ${{ github.ref_name }}
         run: |
           URLS="${YT_URLS}"
-          QUALITY="${YT_QUALITY}"
           ZIP_PASSWORD="${YT_PASSWORD}"
           SPLIT_MB=45
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
           STORAGE="/tmp/downloads"
           mkdir -p "$STORAGE"
           
-          # ⭐️ فرمت‌های اصلاح شده برای کیفیت واقعی
-          case "$QUALITY" in
-            "audio")
-              FORMAT="bestaudio/best"
-              EXTRA="--extract-audio --audio-format mp3 --audio-quality 0"
-              ;;
-            "best")
-              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-            "2160")
-              FORMAT="bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-            "1440")
-              FORMAT="bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-            "1080")
-              FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-            "720")
-              FORMAT="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-            "480")
-              FORMAT="bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-            *)
-              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-              EXTRA="--merge-output-format mp4"
-              ;;
-          esac
+          # ⭐️ حداقل 720p - بهترین کیفیت از 1080p تا 720p
+          FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/bestvideo+bestaudio/best"
           
-          echo "🎯 کیفیت درخواستی: $QUALITY"
-          echo "🎯 فرمت: $FORMAT"
+          echo "🎯 فرمت: حداقل 720p (بهترین کیفیت موجود)"
           
           download_video() {
             local method=$1 url=$2 tmpdir=$3
             
-            COMMON="--output ${tmpdir}/%(title)s.%(ext)s --no-playlist --retries 3 --fragment-retries 3 --no-check-certificates --socket-timeout 30 --newline --no-warnings"
+            COMMON="--merge-output-format mp4 --output ${tmpdir}/%(title)s.%(ext)s --no-playlist --retries 3 --fragment-retries 3 --no-check-certificates --socket-timeout 30 --newline --no-warnings"
             
-            # اول روش ۳ که جواب داد
             case $method in
               1) echo "🔄 روش 1 (Android + WARP)"
-                 yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $EXTRA $COMMON \
+                 yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
                    --extractor-args "youtube:player_client=android" \
                    --user-agent "Mozilla/5.0 (Linux; Android 12) Chrome/112.0.0.0 Mobile Safari/537.36" \
                    "$url" 2>/dev/null && return 0 ;;
               2) echo "🔄 روش 2 (Web + WARP + Deno)"
-                 yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $EXTRA $COMMON \
+                 yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
                    --extractor-args "youtube:player_client=web" --js-runtimes deno "$url" 2>/dev/null && return 0 ;;
               3) echo "🔄 روش 3 (MWEB + WARP)"
-                 yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $EXTRA $COMMON \
+                 yt-dlp --proxy socks5://127.0.0.1:1080 --format "$FORMAT" $COMMON \
                    --extractor-args "youtube:player_client=mweb" "$url" 2>/dev/null && return 0 ;;
               4) echo "🔄 روش 4 (Android + بدون WARP)"
-                 yt-dlp --format "$FORMAT" $EXTRA $COMMON \
+                 yt-dlp --format "$FORMAT" $COMMON \
                    --extractor-args "youtube:player_client=android" \
                    --user-agent "Mozilla/5.0 (Linux; Android 12) Chrome/112.0.0.0 Mobile Safari/537.36" \
                    "$url" 2>/dev/null && return 0 ;;
               5) echo "🔄 روش 5 (Web + بدون WARP + Deno)"
-                 yt-dlp --format "$FORMAT" $EXTRA $COMMON \
+                 yt-dlp --format "$FORMAT" $COMMON \
                    --extractor-args "youtube:player_client=web" --js-runtimes deno "$url" 2>/dev/null && return 0 ;;
             esac
             return 1
@@ -179,12 +129,8 @@ jobs:
             local dest="$STORAGE/$folder"
             mkdir -p "$dest"
             
-            # ⭐️ بررسی کیفیت واقعی
-            ACTUAL_HEIGHT=""
-            if [ "$QUALITY" != "audio" ]; then
-              ACTUAL_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$file" 2>/dev/null || echo "نامشخص")
-              echo "📊 کیفیت واقعی: ${ACTUAL_HEIGHT}p"
-            fi
+            ACTUAL_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$file" 2>/dev/null || echo "نامشخص")
+            echo "📊 کیفیت واقعی: ${ACTUAL_HEIGHT}p"
             
             if [ "$size" -gt "$SPLIT_BYTES" ]; then
               echo "📦 قطعه‌قطعه: $name ($(( size / 1048576 ))MB)"
