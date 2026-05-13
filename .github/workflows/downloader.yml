@@ -48,7 +48,7 @@ jobs:
             echo "$COOKIES" > /tmp/cookies.txt
             echo "✅ کوکی آماده شد"
           else
-            echo "ℹ️ کوکی تنظیم نشده - برای یوتیوب از Invidious استفاده کن"
+            echo "ℹ️ کوکی تنظیم نشده"
           fi
         env:
           COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
@@ -73,11 +73,10 @@ jobs:
           TMP_DL="/tmp/downloads_temp"
           mkdir -p "$STORAGE" "$TMP_DL"
           
-          # آماده‌سازی آرگومان کوکی
           COOKIE_ARG=""
           if [ -f /tmp/cookies.txt ] && [ -s /tmp/cookies.txt ]; then
             COOKIE_ARG="--cookies /tmp/cookies.txt"
-            echo "🍪 استفاده از کوکی برای احراز هویت"
+            echo "🍪 استفاده از کوکی"
           fi
           
           is_youtube() {
@@ -86,6 +85,17 @@ jobs:
           
           is_social_media() {
             echo "$1" | grep -qiE "(instagram\.com|twitter\.com|x\.com|tiktok\.com|facebook\.com|reddit\.com|vimeo\.com|dailymotion\.com|twitch\.tv)"
+          }
+
+          extract_video_id() {
+            local url="$1"
+            if echo "$url" | grep -q "youtu\.be"; then
+              echo "$url" | sed 's|.*youtu\.be/||' | sed 's|[?#].*||'
+            elif echo "$url" | grep -q "v="; then
+              echo "$url" | sed 's|.*v=||' | sed 's|[&#].*||'
+            else
+              echo ""
+            fi
           }
           
           download_normal() {
@@ -134,11 +144,12 @@ jobs:
               --no-playlist \
               --merge-output-format mp4 \
               --output "${prefix}_%(title)s.%(ext)s" \
-              --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+              --format "best[height<=1080][ext=mp4]/best[ext=mp4]/best" \
               --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
               --retries 5 \
               --fragment-retries 5 \
               --socket-timeout 30 \
+              --extractor-retries 3 \
               "$url" 2>&1 && return 0
             
             return 1
@@ -218,12 +229,20 @@ jobs:
             
             if is_youtube "$url" || is_social_media "$url"; then
               echo "🎬 تشخیص: ویدیو/شبکه اجتماعی"
+              
+              # استخراج video_id قبل از دانلود
+              VIDEO_ID=$(extract_video_id "$url")
+              
               if download_ytdlp "$url" "$COUNT"; then
-                echo "✅ yt-dlp موفق بود"
+                echo "✅ دانلود موفق"
               else
-                echo "❌ yt-dlp ناموفق"
-                echo "💡 پیشنهاد: از Invidious استفاده کن"
-                echo "   https://inv.nadeko.net/watch?v=$(echo "$url" | grep -oP 'v=[^&\s]+' | cut -c3-)"
+                echo "❌ دانلود ناموفق"
+                if [ -n "$VIDEO_ID" ]; then
+                  echo ""
+                  echo "💡 از این لینک‌ها استفاده کن:"
+                  echo "   https://inv.nadeko.net/watch?v=$VIDEO_ID"
+                  echo "   https://yewtu.be/watch?v=$VIDEO_ID"
+                fi
                 FAILED=$((FAILED + 1))
                 continue
               fi
