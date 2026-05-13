@@ -1,0 +1,258 @@
+name: "📥 My Personal Downloader"
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: '🔗 لینک های دانلود (با فاصله جدا کنید)'
+        required: true
+        type: string
+      mode:
+        description: '📦 حالت ذخیره سازی'
+        required: false
+        default: 'separate'
+        type: choice
+        options:
+          - separate
+          - zip_together
+      zip_password:
+        description: '🔒 رمز فایل زیپ (اختیاری)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  downloader:
+    name: "📥 دانلود و آپلود فایل"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Install Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 zip curl bc
+          echo "✅ ابزارها نصب شدن"
+
+      - name: ⚙️ Configure Git
+        run: |
+          git config --global http.postBuffer 524288000
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 📥 Download & Process Files
+        id: download
+        run: |
+          URLS="${{ github.event.inputs.urls }}"
+          MODE="${{ github.event.inputs.mode }}"
+          ZIP_PASS="${{ github.event.inputs.zip_password }}"
+          
+          SPLIT_MB=45
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+          
+          STORAGE="/tmp/storage"
+          TMP_DL="/tmp/downloads_temp"
+          mkdir -p "$STORAGE" "$TMP_DL"
+          
+          download() {
+            local url="$1"
+            local name="$2"
+            name=$(echo "$name" | sed 's/[?#].*//' | sed 's/[<>:"|?*]/_/g')
+            
+            echo "⬇️ دانلود: $name"
+            
+            aria2c -x2 -s2 \
+              --max-tries=3 \
+              --retry-wait=5 \
+              --timeout=60 \
+              --connect-timeout=30 \
+              --check-certificate=false \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              -d "$TMP_DL" \
+              -o "$name" \
+              "$url" 2>/dev/null && return 0
+            
+            echo "🔄 تلاش با curl..."
+            curl -L -f \
+              --retry 3 \
+              --retry-delay 5 \
+              --connect-timeout 30 \
+              --max-time 3600 \
+              -A "Mozilla/5.0" \
+              -o "$TMP_DL/$name" \
+              "$url" 2>/dev/null && return 0
+            
+            return 1
+          }
+          
+          save_file() {
+            local file="$1"
+            local size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+            local name=$(basename "$file")
+            local folder_name="${name%.*}"
+            local folder="$STORAGE/$folder_name"
+            
+            mkdir -p "$folder"
+            
+            if [ "$size" -gt "$SPLIT_BYTES" ]; then
+              echo "📦 قطعه قطعه کردن: $name ($(( size / 1024 / 1024 ))MB)"
+              cd "$folder"
+              [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
+              zip -j $pw_arg -s ${SPLIT_MB}m "$folder_name.zip" "$file" 2>/dev/null
+              cd - > /dev/null
+            else
+              echo "📦 ذخیره: $name ($(( size / 1024 / 1024 ))MB)"
+              [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
+              zip -j $pw_arg "$folder/$folder_name.zip" "$file" 2>/dev/null
+            fi
+            
+            make_readme "$folder" "$name" "$size"
+          }
+          
+          make_readme() {
+            local folder="$1"
+            local original_name="$2"
+            local original_size="$3"
+            local folder_name=$(basename "$folder")
+            local size_mb=$(echo "scale=2; $original_size / 1048576" | bc)
+            
+            local part_count=0
+            local total_size=0
+            for p in "$folder"/*.zip "$folder"/*.z"0"* "$folder"/*.z"1"*; do
+              [ -f "$p" ] || continue
+              part_count=$((part_count + 1))
+              total_size=$((total_size + $(stat -c%s "$p" 2>/dev/null || echo 0)))
+            done
+            local total_mb=$(echo "scale=2; $total_size / 1048576" | bc)
+            
+            cat > "$folder/README.md" << EOF
+          # 📁 $original_name
+          
+          | مشخصات | مقدار |
+          |---------|-------|
+          | **فایل اصلی** | \`$original_name\` |
+          | **حجم کل** | $total_mb MB |
+          | **تعداد قطعات** | $part_count |
+          | **رمز عبور** | $([ -n "$ZIP_PASS" ] && echo "✅ دارد" || echo "❌ ندارد") |
+          
+          ## 📥 نحوه استخراج
+          
+          1. تمام قطعات را دانلود کنید
+          2. فایل \`$folder_name.zip\` را با WinRAR یا 7-Zip باز کنید
+          3. Extract کنید (قطعات خودکار ترکیب می‌شوند)
+          $([ -n "$ZIP_PASS" ] && echo "4. رمز عبور را وارد کنید")
+          
+          ---
+          📅 تاریخ: $(date '+%Y-%m-%d %H:%M')
+          EOF
+          }
+          
+          FAILED=0
+          SUCCESS=0
+          
+          for url in $URLS; do
+            name=$(basename "$url" | sed 's/%20/ /g')
+            
+            if download "$url" "$name"; then
+              if [ -f "$TMP_DL/$name" ] && [ -s "$TMP_DL/$name" ]; then
+                save_file "$TMP_DL/$name"
+                SUCCESS=$((SUCCESS + 1))
+                echo "✅ $name"
+              else
+                FAILED=$((FAILED + 1))
+                echo "❌ فایل خالی: $name"
+              fi
+            else
+              FAILED=$((FAILED + 1))
+              echo "❌ خطا در دانلود: $name"
+            fi
+            echo ""
+          done
+          
+          if [ "$MODE" = "zip_together" ] && [ "$SUCCESS" -gt 0 ]; then
+            echo "📦 ساخت آرشیو ترکیبی..."
+            BUNDLE="bundle_$(date +%Y%m%d_%H%M%S)"
+            mkdir -p "$STORAGE/$BUNDLE"
+            cd "$STORAGE/$BUNDLE"
+            
+            all_files=""
+            for f in "$TMP_DL"/*; do
+              [ -f "$f" ] && [ -s "$f" ] && all_files="$all_files $f"
+            done
+            
+            if [ -n "$all_files" ]; then
+              [ -n "$ZIP_PASS" ] && pw_arg="-P $ZIP_PASS" || pw_arg=""
+              zip -j $pw_arg -s ${SPLIT_MB}m "$BUNDLE.zip" $all_files 2>/dev/null
+              make_readme "$STORAGE/$BUNDLE" "Combined_Archive.zip" $(du -sb "$TMP_DL" | cut -f1)
+            fi
+            cd - > /dev/null
+          fi
+          
+          {
+            echo "# 📥 فایل‌های دانلود شده"
+            echo ""
+            echo "| # | پوشه | لینک |"
+            echo "|---|-------|------|"
+            num=1
+            for d in "$STORAGE"/*/; do
+              [ -d "$d" ] || continue
+              dn=$(basename "$d")
+              echo "| $num | \`$dn\` | [مشاهده](./downloads/$dn/) |"
+              num=$((num + 1))
+            done
+            echo ""
+            echo "---"
+            echo "📅 آخرین به‌روزرسانی: $(date '+%Y-%m-%d %H:%M')"
+          } > "$STORAGE/README.md"
+          
+          echo "✅ دانلود تموم شد: $SUCCESS موفق | $FAILED ناموفق"
+          echo "storage=$STORAGE" >> $GITHUB_OUTPUT
+
+      - name: 📤 Push to GitHub
+        run: |
+          STORAGE="/tmp/storage"
+          BRANCH="${GITHUB_REF_NAME}"
+          
+          if [ ! -d "$STORAGE" ] || [ -z "$(ls -A $STORAGE 2>/dev/null)" ]; then
+            echo "❌ فایلی برای آپلود نیست"
+            exit 1
+          fi
+          
+          rm -rf downloads
+          mkdir -p downloads
+          cp -r "$STORAGE"/* downloads/
+          
+          git add downloads/ README.md 2>/dev/null
+          
+          git commit -m "📥 آپدیت دانلودها - $(date '+%Y-%m-%d %H:%M')" 2>/dev/null || {
+            echo "ℹ️ تغییر جدیدی نیست"
+            exit 0
+          }
+          
+          for i in 1 2 3 4 5; do
+            echo "🔄 تلاش $i برای push..."
+            if git push origin HEAD:"$BRANCH" 2>&1; then
+              echo "✅ آپلود موفق!"
+              break
+            fi
+            echo "⏳ صبر ۵ ثانیه..."
+            sleep 5
+          done
+
+      - name: 🎉 نمایش نتیجه
+        run: |
+          echo ""
+          echo "========================================="
+          echo "✅ کار تموم شد!"
+          echo ""
+          echo "🔗 فایل‌ها اینجان:"
+          echo "${{ github.server_url }}/${{ github.repository }}/tree/${{ github.ref_name }}/downloads"
+          echo "========================================="
