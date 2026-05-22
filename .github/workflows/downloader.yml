@@ -1,19 +1,19 @@
-name: "🎯 دانلود یوتیوب"
+name: "🎯 دانلود فایل (یوتیوب + لینک مستقیم)"
 
 on:
   workflow_dispatch:
     inputs:
-      video_urls:
-        description: '🔗 لینک ویدیو (چند لینک با فاصله)'
+      urls:
+        description: '🔗 لینک فایل‌ها (چند لینک با فاصله)'
         required: true
         type: string
       download_subtitles:
-        description: '📝 زیرنویس (فارسی و انگلیسی)'
+        description: '📝 زیرنویس (فقط یوتیوب - فارسی و انگلیسی)'
         required: false
         default: false
         type: boolean
       quality:
-        description: '🎬 کیفیت و نوع'
+        description: '🎬 کیفیت (فقط یوتیوب)'
         required: false
         default: 'best'
         type: choice
@@ -26,24 +26,24 @@ on:
           - 480
           - audio
       password:
-        description: '🔒 رمز (اختیاری)'
+        description: '🔒 رمز فایل ZIP (اختیاری)'
         required: false
         default: ''
         type: string
 
 jobs:
-  get-video:
-    name: "📥 دانلود ویدیو"
+  download-files:
+    name: "📥 دانلود فایل‌ها"
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
       contents: write
 
     steps:
-      - name: Check URL provided
+      - name: Check URLs provided
         run: |
-          if [ -z "${{ github.event.inputs.video_urls }}" ]; then
-            echo "❌ No video URL provided!"
+          if [ -z "${{ github.event.inputs.urls }}" ]; then
+            echo "❌ No URL provided!"
             exit 1
           fi
 
@@ -65,7 +65,7 @@ jobs:
           git config user.email "github-actions@github.com"
           echo "Git configured for large file handling"
 
-      - name: Start WARP Container
+      - name: Start WARP Container (for YouTube geo-restrictions)
         run: |
           echo "Starting Cloudflare WARP container..."
           docker network create warp-net || true
@@ -104,7 +104,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip ffmpeg zip p7zip-full curl jq bc unzip
+          sudo apt-get install -y python3-pip ffmpeg zip p7zip-full curl jq bc unzip wget aria2
           curl -fsSL https://deno.land/install.sh | sh
           export DENO_INSTALL="$HOME/.deno"
           export PATH="$DENO_INSTALL/bin:$PATH"
@@ -112,11 +112,11 @@ jobs:
           deno --version
           pip3 install --upgrade yt-dlp
 
-      - name: Download YouTube Video(s)
+      - name: Download Files (YouTube + Direct Links)
         env:
-          YT_URLS: ${{ github.event.inputs.video_urls }}
+          RAW_URLS: ${{ github.event.inputs.urls }}
           YT_QUALITY: ${{ github.event.inputs.quality }}
-          YT_PASSWORD: ${{ github.event.inputs.password }}
+          ZIP_PASSWORD: ${{ github.event.inputs.password }}
           REPO_OWNER_ENV: ${{ github.repository_owner }}
           REPO_NAME_ENV: ${{ github.event.repository.name }}
           BRANCH_ENV: ${{ github.ref_name }}
@@ -125,29 +125,32 @@ jobs:
           REPO_OWNER="${REPO_OWNER_ENV}"
           REPO_NAME="${REPO_NAME_ENV}"
           BRANCH="${BRANCH_ENV}"
-          URLS_RAW="${YT_URLS}"
-          read -ra URL_LIST <<< "$URLS_RAW"
+          read -ra URL_LIST <<< "$RAW_URLS"
           TOTAL_URLS=${#URL_LIST[@]}
           QUALITY="${YT_QUALITY}"
-          ZIP_PASSWORD="${YT_PASSWORD}"
-          DOWNLOAD_SUBS="${{ github.event.inputs.download_subtitles }}"
+          ZIP_PASSWORD="${ZIP_PASSWORD}"
           SPLIT_MB=45
           SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
-          BACKUP_DIR="/tmp/video_backup_$$"
+          BACKUP_DIR="/tmp/files_backup_$$"
           mkdir -p "$BACKUP_DIR"
           mkdir -p videos
-          > /tmp/video_info.txt
+          > /tmp/file_info.txt
 
-          echo "Total URLs to download: $TOTAL_URLS"
-          echo "Quality: $QUALITY"
+          echo "Total URLs: $TOTAL_URLS"
+          echo "YouTube quality setting: $QUALITY"
 
           # ── FUNCTIONS ────────────────────────────────
           sanitize_name() {
-            echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-'
+            echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-' | sed 's/[^a-zA-Z0-9_.-]/_/g'
           }
           urlencode() {
             python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
           }
+          is_youtube_url() {
+            [[ "$1" =~ (youtube\.com|youtu\.be) ]]
+          }
+
+          # yt-dlp quality format
           case "$QUALITY" in
             "audio") FORMAT="bestaudio/bestaudio*/best";;
             "best") FORMAT="bestvideo+bestaudio/bestvideo*+bestaudio*/best";;
@@ -158,9 +161,10 @@ jobs:
             "480") FORMAT="bestvideo[height<=480]+bestaudio/bestvideo[height<=480]*+bestaudio*/bestvideo+bestaudio/best";;
             *) FORMAT="bestvideo+bestaudio/bestvideo*+bestaudio*/best";;
           esac
-          download_video() {
+
+          download_youtube() {
             local METHOD=$1; local URL=$2; local TMP_DIR=$3;
-            echo "Trying download method $METHOD..."
+            echo "Trying YouTube download method $METHOD..."
             if [ "$QUALITY" = "audio" ]; then
               COMMON_FLAGS="--extract-audio --audio-format mp3 --audio-quality 0 --write-thumbnail --convert-thumbnails jpg --no-cache-dir --output ${TMP_DIR}/%(title)s.%(ext)s --no-part --no-playlist --retries 5 --fragment-retries 5 --no-check-certificates --concurrent-fragments 8 --buffer-size 16K --http-chunk-size 10M --progress --newline"
             elif [ "$QUALITY" = "best" ]; then
@@ -177,8 +181,25 @@ jobs:
               6) yt-dlp --format "$FORMAT" $COMMON_FLAGS --extractor-args "youtube:player_client=web" --js-runtimes deno --remote-components ejs:github "$URL";;
               7) yt-dlp --format "$FORMAT" $COMMON_FLAGS --extractor-args "youtube:player_client=mweb" "$URL";;
               8) yt-dlp --proxy "socks5://127.0.0.1:1080" --format "$FORMAT" $COMMON_FLAGS --extractor-args "youtube:player_client=android" --user-agent "Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" "$URL";;
+              9) yt-dlp --format "$FORMAT" $COMMON_FLAGS --no-proxy "$URL";;  # fallback without proxy
             esac
           }
+
+          download_generic() {
+            local url="$1"
+            local outdir="$2"
+            local filename="$(basename "$url" | cut -d '?' -f1)"
+            if [ -z "$filename" ] || [ "$filename" = "/" ]; then
+              filename="file_$(date +%s)"
+            fi
+            echo "Downloading generic file: $url"
+            wget --no-check-certificate --timeout=60 --tries=5 \
+                 --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                 -P "$outdir" "$url" && return 0
+            # fallback to curl if wget fails
+            curl -L --fail --retry 5 --connect-timeout 60 --user-agent "Mozilla/5.0" -o "$outdir/$filename" "$url"
+          }
+
           RANDOM_WORDS=("alpha" "beta" "gamma" "delta" "epsilon" "zeta" "theta" "kappa" "lambda" "sigma" "omega" "nova" "star" "moon" "sun" "sky" "cloud" "river" "ocean" "mountain")
           get_random_word() { echo "${RANDOM_WORDS[$RANDOM % ${#RANDOM_WORDS[@]}]}_$RANDOM"; }
           get_unique_folder() {
@@ -188,62 +209,79 @@ jobs:
             while [ -d "$BASE_PATH/${NAME}_${RANDOM_SUFFIX}" ] || [ -d "$BACKUP_DIR/${NAME}_${RANDOM_SUFFIX}" ]; do RANDOM_SUFFIX=$(get_random_word); done
             echo "${NAME}_${RANDOM_SUFFIX}"
           }
-          normalize_youtube_url() {
-            local INPUT_URL="$1"
-            if [[ "$INPUT_URL" =~ youtu\.be/([a-zA-Z0-9_-]+) ]]; then
-              VIDEO_ID="${BASH_REMATCH[1]}"; VIDEO_ID="${VIDEO_ID%%\?*}";
-              echo "https://www.youtube.com/watch?v=${VIDEO_ID}"
-            else
-              echo "$INPUT_URL"
-            fi
-          }
 
           # ── MAIN LOOP ────────────────────────────────
           URL_INDEX=0
           for URL in "${URL_LIST[@]}"; do
             URL_INDEX=$((URL_INDEX + 1))
-            URL=$(normalize_youtube_url "$URL")
+            URL=$(echo "$URL" | xargs)  # trim
             echo "============================================================"
             echo "Processing URL $URL_INDEX / $TOTAL_URLS : $URL"
             echo "============================================================"
-            TMP_DIR="tmp_downloads_${URL_INDEX}"
+            TMP_DIR="tmp_download_${URL_INDEX}"
             mkdir -p "$TMP_DIR"
             DOWNLOAD_SUCCESS=false
-            for METHOD in 1 2 3 4 5 6 7 8; do
-              if download_video $METHOD "$URL" "$TMP_DIR"; then
-                echo "Download successful with method $METHOD!"
-                QUALITY_OK=true
-                if [ "$QUALITY" != "best" ] && [ "$QUALITY" != "audio" ]; then
-                  for DOWNLOADED_FILE in "$TMP_DIR"/*.mp4 "$TMP_DIR"/*.webm "$TMP_DIR"/*.mkv; do
-                    [ -f "$DOWNLOADED_FILE" ] || continue
-                    ACTUAL_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$DOWNLOADED_FILE" 2>/dev/null || echo "unknown")
-                    if [ "$ACTUAL_HEIGHT" != "unknown" ] && [ "$ACTUAL_HEIGHT" -lt $(( QUALITY - 150 )) ] 2>/dev/null; then
-                      echo "⚠️  Method $METHOD delivered ${ACTUAL_HEIGHT}p instead of ${QUALITY}p — rejecting..."
-                      QUALITY_OK=false; rm -f "$DOWNLOADED_FILE";
-                    fi
-                  done
+            ORIGINAL_FILENAME=""
+
+            if is_youtube_url "$URL"; then
+              echo "Detected YouTube URL"
+              for METHOD in 1 2 3 4 5 6 7 8 9; do
+                if download_youtube $METHOD "$URL" "$TMP_DIR"; then
+                  echo "YouTube download successful with method $METHOD!"
+                  QUALITY_OK=true
+                  if [ "$QUALITY" != "best" ] && [ "$QUALITY" != "audio" ]; then
+                    for DOWNLOADED_FILE in "$TMP_DIR"/*.mp4 "$TMP_DIR"/*.webm "$TMP_DIR"/*.mkv; do
+                      [ -f "$DOWNLOADED_FILE" ] || continue
+                      ACTUAL_HEIGHT=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 "$DOWNLOADED_FILE" 2>/dev/null || echo "unknown")
+                      if [ "$ACTUAL_HEIGHT" != "unknown" ] && [ "$ACTUAL_HEIGHT" -lt $(( QUALITY - 150 )) ] 2>/dev/null; then
+                        echo "⚠️  Method $METHOD delivered ${ACTUAL_HEIGHT}p instead of ${QUALITY}p — rejecting..."
+                        QUALITY_OK=false; rm -f "$DOWNLOADED_FILE";
+                      fi
+                    done
+                  fi
+                  if [ "$QUALITY_OK" = true ]; then DOWNLOAD_SUCCESS=true; break; fi
+                else
+                  echo "Method $METHOD failed, waiting 3 seconds..."
+                  sleep 3
                 fi
-                if [ "$QUALITY_OK" = true ]; then DOWNLOAD_SUCCESS=true; break; fi
+              done
+            else
+              echo "Detected generic URL"
+              if download_generic "$URL" "$TMP_DIR"; then
+                DOWNLOAD_SUCCESS=true
+                echo "Generic download successful"
               else
-                echo "Method $METHOD failed, waiting 3 seconds..."
-                sleep 3
+                echo "Generic download failed"
               fi
-            done
+            fi
+
             if [ "$DOWNLOAD_SUCCESS" = false ]; then
               echo "❌ All download methods failed for URL: $URL — skipping."; rm -rf "$TMP_DIR"; continue;
             fi
+
             find "$TMP_DIR" -name "*.part" -delete
+            # Process each downloaded file
             for FILE in "$TMP_DIR"/*; do
               [ -f "$FILE" ] || continue
-              if [[ "$FILE" == *.jpg ]] || [[ "$FILE" == *.webp ]]; then continue; fi
-              SIZE=$(stat -c%s "$FILE"); BASENAME=$(basename "$FILE"); FILENAME_NO_EXT="${BASENAME%.*}"; EXT="${BASENAME##*.}";
+              # For YouTube, skip thumbnail jpg (they are separate)
+              if is_youtube_url "$URL" && [[ "$FILE" == *.jpg ]]; then
+                THUMB_FILE="$FILE"
+                continue
+              fi
+              SIZE=$(stat -c%s "$FILE")
+              BASENAME=$(basename "$FILE")
+              FILENAME_NO_EXT="${BASENAME%.*}"
+              EXT="${BASENAME##*.}"
               FILENAME_NO_EXT=$(sanitize_name "$FILENAME_NO_EXT")
               FINAL_FOLDER_NAME=$(get_unique_folder "videos" "$FILENAME_NO_EXT")
               mkdir -p "$BACKUP_DIR/${FINAL_FOLDER_NAME}"
-              THUMB_FILE=$(ls "$TMP_DIR"/*.jpg 2>/dev/null | head -1)
-              if [ -n "$THUMB_FILE" ] && [ -f "$THUMB_FILE" ]; then cp "$THUMB_FILE" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/thumbnail.jpg"; fi
-              echo "${FILENAME_NO_EXT}|${FINAL_FOLDER_NAME}" >> /tmp/video_info.txt
+              # Copy thumbnail if exists
+              if [ -n "$THUMB_FILE" ] && [ -f "$THUMB_FILE" ]; then
+                cp "$THUMB_FILE" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/thumbnail.jpg"
+              fi
+              echo "${FILENAME_NO_EXT}|${FINAL_FOLDER_NAME}" >> /tmp/file_info.txt
               FOLDER_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}")
+
               if [ "$SIZE" -gt "$SPLIT_BYTES" ]; then
                 ARCHIVE_BASE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}"
                 if [ -n "$ZIP_PASSWORD" ]; then
@@ -276,14 +314,11 @@ jobs:
                 done
 
                 MAIN_ZIP="${FINAL_FOLDER_NAME}.zip"
-
                 README_FILE="$BACKUP_DIR/${FINAL_FOLDER_NAME}/README.md"
                 {
                   printf '%s\n' "# ${FILENAME_NO_EXT}"
                   printf '%s\n' ""
                   if [ -f "$BACKUP_DIR/${FINAL_FOLDER_NAME}/thumbnail.jpg" ]; then
-                    THUMB_ENCODED=$(urlencode "thumbnail.jpg")
-                    THUMB_RAW_LINK="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/videos/${FOLDER_ENCODED}/${THUMB_ENCODED}"
                     printf '%s\n' "<div align=\"center\">"
                     printf '%s\n' "  <picture>"
                     printf '%s\n' "    <img src=\"thumbnail.jpg\" width=\"250\" />"
@@ -295,14 +330,18 @@ jobs:
                   fi
                   printf '%s\n' "---"
                   printf '%s\n' ""
-                  printf '%s\n' "## Video Information"
+                  printf '%s\n' "## File Information"
                   printf '%s\n' ""
                   printf '%s\n' "| Property | Value |"
                   printf '%s\n' "|----------|-------|"
-                  printf '%s\n' "| **Video Name** | \`${FILENAME_NO_EXT}\` |"
-                  printf '%s\n' "| **Original Link** | [YouTube Video](${URL}) |"
+                  printf '%s\n' "| **File Name** | \`${FILENAME_NO_EXT}\` |"
+                  printf '%s\n' "| **Original Link** | [Source](${URL}) |"
                   printf '%s\n' "| **Total Size** | **${PART_COUNT} parts** - **${TOTAL_SIZE_MB} MB** |"
-                  printf '%s\n' "| **Quality** | **${QUALITY}** |"
+                  if is_youtube_url "$URL"; then
+                    printf '%s\n' "| **Quality** | **${QUALITY}** |"
+                  else
+                    printf '%s\n' "| **Type** | Direct download |"
+                  fi
                   printf '%s\n' "| **Status** | **Complete (100%)** |"
                   if [ -n "$ZIP_PASSWORD" ]; then
                     printf '%s\n' "| **Password Protected** | **YES** |"
@@ -346,13 +385,11 @@ jobs:
                   printf '%s\n' ""
                   printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                 } > "$README_FILE"
-                echo "Created README.md"
+                echo "Created README.md for split archive"
               else
+                # Single file (no split)
                 if [ -n "$ZIP_PASSWORD" ]; then
-                  echo "$BASENAME - creating password-protected zip archive"
-                  zip -0 -P "${ZIP_PASSWORD}" \
-                    "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" \
-                    "$FILE"
+                  zip -0 -P "${ZIP_PASSWORD}" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.zip" "$FILE"
                   SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
                   FILE_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}.zip")
                   RAW_LINK="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/videos/${FOLDER_ENCODED}/${FILE_ENCODED}"
@@ -361,11 +398,9 @@ jobs:
                     printf '%s\n' "# ${FILENAME_NO_EXT}"
                     printf '%s\n' ""
                     if [ -f "$BACKUP_DIR/${FINAL_FOLDER_NAME}/thumbnail.jpg" ]; then
-                      THUMB_ENCODED=$(urlencode "thumbnail.jpg")
-                      THUMB_RAW_LINK="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/videos/${FOLDER_ENCODED}/${THUMB_ENCODED}"
                       printf '%s\n' "<div align=\"center\">"
                       printf '%s\n' "  <picture>"
-                      printf '%s\n' "    <img src=\"${THUMB_RAW_LINK}\" alt=\"Video Thumbnail\" width=\"250\" />"
+                      printf '%s\n' "    <img src=\"thumbnail.jpg\" width=\"250\" />"
                       printf '%s\n' "  </picture>"
                       printf '%s\n' "</div>"
                       printf '%s\n' ""
@@ -374,14 +409,18 @@ jobs:
                     fi
                     printf '%s\n' "---"
                     printf '%s\n' ""
-                    printf '%s\n' "## Video Information"
+                    printf '%s\n' "## File Information"
                     printf '%s\n' ""
                     printf '%s\n' "| Property | Value |"
                     printf '%s\n' "|----------|-------|"
-                    printf '%s\n' "| **Video Name** | \`${FILENAME_NO_EXT}\` |"
-                    printf '%s\n' "| **Original Link** | [YouTube Video](${URL}) |"
+                    printf '%s\n' "| **File Name** | \`${FILENAME_NO_EXT}\` |"
+                    printf '%s\n' "| **Original Link** | [Source](${URL}) |"
                     printf '%s\n' "| **Total Size** | **1 archive** - **${SIZE_MB} MB** |"
-                    printf '%s\n' "| **Quality** | **${QUALITY}** |"
+                    if is_youtube_url "$URL"; then
+                      printf '%s\n' "| **Quality** | **${QUALITY}** |"
+                    else
+                      printf '%s\n' "| **Type** | Direct download |"
+                    fi
                     printf '%s\n' "| **Status** | **Complete (100%)** |"
                     printf '%s\n' "| **Password Protected** | **YES** |"
                     printf '%s\n' ""
@@ -408,9 +447,8 @@ jobs:
                     printf '%s\n' ""
                     printf '%s\n' "*This tool created by [avasam.ir](https://avasam.ir)*"
                   } > "$README_FILE"
-                  echo "Created password-protected zip archive and README.md"
+                  echo "Created password-protected zip and README.md"
                 else
-                  echo "$BASENAME - copying directly (no archive needed)"
                   cp "$FILE" "$BACKUP_DIR/${FINAL_FOLDER_NAME}/${FINAL_FOLDER_NAME}.${EXT}"
                   SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
                   FILE_ENCODED=$(urlencode "${FINAL_FOLDER_NAME}.${EXT}")
@@ -420,11 +458,9 @@ jobs:
                     printf '%s\n' "# ${FILENAME_NO_EXT}"
                     printf '%s\n' ""
                     if [ -f "$BACKUP_DIR/${FINAL_FOLDER_NAME}/thumbnail.jpg" ]; then
-                      THUMB_ENCODED=$(urlencode "thumbnail.jpg")
-                      THUMB_RAW_LINK="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/videos/${FOLDER_ENCODED}/${THUMB_ENCODED}"
                       printf '%s\n' "<div align=\"center\">"
                       printf '%s\n' "  <picture>"
-                      printf '%s\n' "    <img src=\"${THUMB_RAW_LINK}\" alt=\"Video Thumbnail\" width=\"250\" />"
+                      printf '%s\n' "    <img src=\"thumbnail.jpg\" width=\"250\" />"
                       printf '%s\n' "  </picture>"
                       printf '%s\n' "</div>"
                       printf '%s\n' ""
@@ -433,14 +469,18 @@ jobs:
                     fi
                     printf '%s\n' "---"
                     printf '%s\n' ""
-                    printf '%s\n' "## Video Information"
+                    printf '%s\n' "## File Information"
                     printf '%s\n' ""
                     printf '%s\n' "| Property | Value |"
                     printf '%s\n' "|----------|-------|"
-                    printf '%s\n' "| **Video Name** | \`${FILENAME_NO_EXT}\` |"
-                    printf '%s\n' "| **Original Link** | [YouTube Video](${URL}) |"
-                    printf '%s\n' "| **Total Size** | **1 file** (no split) - **${SIZE_MB} MB** |"
-                    printf '%s\n' "| **Quality** | **${QUALITY}** |"
+                    printf '%s\n' "| **File Name** | \`${FILENAME_NO_EXT}\` |"
+                    printf '%s\n' "| **Original Link** | [Source](${URL}) |"
+                    printf '%s\n' "| **Total Size** | **1 file** - **${SIZE_MB} MB** |"
+                    if is_youtube_url "$URL"; then
+                      printf '%s\n' "| **Quality** | **${QUALITY}** |"
+                    else
+                      printf '%s\n' "| **Type** | Direct download |"
+                    fi
                     printf '%s\n' "| **Status** | **Complete (100%)** |"
                     printf '%s\n' "| **Password Protected** | **NO** |"
                     printf '%s\n' ""
@@ -470,9 +510,9 @@ jobs:
           echo "REPO_OWNER_ENV=${REPO_OWNER_ENV}" > /tmp/env_vars.txt
           echo "REPO_NAME_ENV=${REPO_NAME_ENV}" >> /tmp/env_vars.txt
           echo "BRANCH_ENV=${BRANCH_ENV}" >> /tmp/env_vars.txt
-          printf "%s\n" "${URL_LIST[@]}" > /tmp/yt_urls.txt
+          printf "%s\n" "${URL_LIST[@]}" > /tmp/urls.txt
 
-      - name: Download Subtitles
+      - name: Download Subtitles (Only for YouTube)
         if: ${{ github.event.inputs.download_subtitles == 'true' }}
         run: |
           set +e
@@ -481,7 +521,11 @@ jobs:
           REPO_OWNER=${REPO_OWNER_ENV}
           REPO_NAME=${REPO_NAME_ENV}
           BRANCH=${BRANCH_ENV}
-          mapfile -t URL_LIST < /tmp/yt_urls.txt
+          mapfile -t URL_LIST < /tmp/urls.txt
+
+          is_youtube_url() {
+            [[ "$1" =~ (youtube\.com|youtu\.be) ]]
+          }
 
           sub_download() {
             local MODE=$1; local OUT="$2"; local SURL="$3";
@@ -500,7 +544,7 @@ jobs:
             }
             SFLAGS=$(sub_flags)
             COMMON_SUB="--sub-format vtt/srt/best --convert-subs vtt --skip-download --no-playlist --no-check-certificates --output ${OUT}"
-            for METHOD in 1 2 3 4 5 6 7 8; do
+            for METHOD in 1 2 3 4 5 6 7 8 9; do
               echo "  [subtitle] method $METHOD ..."
               case $METHOD in
                  1) yt-dlp --proxy "socks5://127.0.0.1:1080" --extractor-args "youtube:player_client=web" --js-runtimes deno --remote-components ejs:github --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" --add-header "Accept-Language:en-US,en;q=0.9" $SFLAGS $COMMON_SUB "$SURL" 2>&1 || true;;
@@ -511,6 +555,7 @@ jobs:
                  6) yt-dlp --extractor-args "youtube:player_client=web" --js-runtimes deno --remote-components ejs:github $SFLAGS $COMMON_SUB "$SURL" 2>&1 || true;;
                  7) yt-dlp --extractor-args "youtube:player_client=mweb" $SFLAGS $COMMON_SUB "$SURL" 2>&1 || true;;
                  8) yt-dlp --proxy "socks5://127.0.0.1:1080" --extractor-args "youtube:player_client=android" --user-agent "Mozilla/5.0 (Linux; Android 12; SM-S906N Build/QP1A.190711.020) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" $SFLAGS $COMMON_SUB "$SURL" 2>&1 || true;;
+                 9) yt-dlp --no-proxy $SFLAGS $COMMON_SUB "$SURL" 2>&1 || true;;
               esac
               if [ "$MODE" = "fa-native" ] || [ "$MODE" = "fa-auto" ]; then
                 [ "$(fa_count)" -gt 0 ] && { echo "  [subtitle] ✅ success with method $METHOD"; return 0; }
@@ -532,6 +577,11 @@ jobs:
           while IFS='|' read -r ORIGINAL_NAME FOLDER_NAME; do
             URL_INDEX=$((URL_INDEX + 1)); URL="${URL_LIST[$((URL_INDEX - 1))]}";
             [ -z "$FOLDER_NAME" ] && continue
+            # Only process YouTube URLs for subtitles
+            if ! is_youtube_url "$URL"; then
+              echo "Skipping subtitles for non-YouTube URL: $URL"
+              continue
+            fi
             SUBTITLE_DIR="$BACKUP_DIR/${FOLDER_NAME}/subtitle"; mkdir -p "$SUBTITLE_DIR";
             OUT_TMPL="${SUBTITLE_DIR}/%(title)s"
             echo "Downloading subtitles for: $FOLDER_NAME"
@@ -605,7 +655,7 @@ jobs:
                 fi
               fi
             fi
-          done < /tmp/video_info.txt
+          done < /tmp/file_info.txt
           echo ""
           echo "Subtitle download phase complete."
           echo "=== Final backup dir structure ==="
@@ -637,11 +687,11 @@ jobs:
             mkdir -p videos
             if [ ! -f "videos/README.md" ]; then
               {
-                echo "# DOWNLOADED VIDEOS LIST :"
+                echo "# DOWNLOADED FILES LIST :"
                 echo ""
                 echo "----"
                 echo ""
-                echo "> No videos downloaded yet."
+                echo "> No files downloaded yet."
               } > videos/README.md
               git add -f videos/README.md
               if ! git diff --cached --quiet; then
@@ -663,7 +713,7 @@ jobs:
             else
               echo "videos/ folder already exists in repository."
             fi
-            echo "No video files to push. Exiting."
+            echo "No files to push. Exiting."
             exit 0
           fi
 
@@ -673,7 +723,7 @@ jobs:
 
           regenerate_master_readme() {
             MASTER_README="videos/README.md"
-            { echo "# DOWNLOADED VIDEOS LIST :"; echo ""; echo "----"; echo ""; } > "$MASTER_README"
+            { echo "# DOWNLOADED FILES LIST :"; echo ""; echo "----"; echo ""; } > "$MASTER_README"
             NUM=0
             for folder in videos/*/; do
               [ -d "$folder" ] || continue
@@ -695,7 +745,7 @@ jobs:
           git add -f videos/README.md
 
           if ! git diff --cached --quiet; then
-            git commit -m "YouTube download [skip ci]"
+            git commit -m "File download [skip ci]"
             PUSH_RETRY=0
             while [ $PUSH_RETRY -lt 10 ]; do
               PUSH_RETRY=$((PUSH_RETRY + 1))
@@ -711,7 +761,7 @@ jobs:
                 git add -f videos/
                 regenerate_master_readme
                 git add -f videos/README.md
-                git diff --cached --quiet || git commit -m "YouTube download [skip ci]"
+                git diff --cached --quiet || git commit -m "File download [skip ci]"
               fi
             done
           fi
